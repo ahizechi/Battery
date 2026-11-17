@@ -1,6 +1,5 @@
 #pragma once
-// A small transparent strip on the taskbar, just left of the notification area, showing
-// "[icon] 30%  [icon] 93%". Implemented as a layered child window of the taskbar (Shell_TrayWnd).
+// A layered strip showing device icons and battery levels, on the taskbar or floating above the desktop.
 #include <windows.h>
 #include <string>
 #include <vector>
@@ -17,13 +16,13 @@ struct WidgetItem {
 };
 
 namespace widget {
-// Creates the widget on the primary taskbar. Clicks are reported by posting `clickMsg` to `notifyWnd`.
-bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme);
+// Creates the widget. Clicks are reported by posting `clickMsg` to `notifyWnd`.
+bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme, bool desktop);
+bool IsDesktop();
 void Destroy();
 bool Alive();
 void SetItems(const std::vector<WidgetItem>& items, const std::wstring& tooltip);
 void SetLightTheme(bool light);
-// Re-checks the taskbar layout and moves the widget if needed; call about once a second.
-// Returns false when the taskbar it was attached to is gone.
+// Re-checks placement and DPI; returns false if the widget or its host taskbar is gone.
 bool Reposition();
 }

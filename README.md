@@ -15,14 +15,18 @@ Battery levels of your wireless mouse, headset, keyboard and controller, right o
 ## Display
 
 **On the taskbar (default):** `🎧 30%  🖱 93%` next to the notification area, drawn with the Windows icon font.
-- **Low battery:** a red number means 15% or less.
+- **Low battery:** a red number means the charge is at or below your threshold (15% by default).
 - **Charging:** a blue ⚡ appears next to the number.
 - **Asleep:** dimmed text means the device is asleep and the last known value is shown.
 - **Theme:** it follows light/dark mode and DPI scaling.
 
-**Tray icons:** one icon per device with the number drawn in it, plus a "Low battery" notification at 15%. The app switches to this automatically when the taskbar is vertical or can't be found.
+**Tray icons:** one icon per device with the number drawn in it, with optional low-battery notifications. The app switches to tray icons automatically when the taskbar is vertical or can't be found.
 
-Hover for details. Click for the menu: every device (click one to hide or show it), display mode, *Refresh now*, *Start with Windows*, and *Exit*. Levels refresh every 60 seconds, and right away when a device is plugged in or the PC wakes up.
+**Desktop widget:** a floating strip for mice and headsets that stays above other windows. It shows a dash when one device type has no visible battery reading. Drag the strip to move it, or click it to open the menu.
+
+Hover over the widget or tray icon for details. Click to show or hide individual devices, refresh now, open **Options**, or exit.
+
+In **Options**, choose the display mode, hide sleeping devices, set a refresh interval (30 seconds, 1 minute, 2 minutes, or 5 minutes), and select a low-battery threshold from 5% to 30% in 5-point steps. You can also toggle low-battery notifications in tray mode and launch the app at Windows sign-in. The default interval is 1 minute, and plugging in a device or waking the PC still triggers a refresh. Click **Save** to apply your choices.
 
 ## Supported devices
 

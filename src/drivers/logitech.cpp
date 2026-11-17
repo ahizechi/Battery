@@ -9,6 +9,7 @@
 // 0x1F20 ADC measurement (headsets). HID++ 1.0 devices: registers 0x0D and 0x07.
 // References: Logitech HID++ 2.0 specification drafts, github.com/pwr-Solaar/Solaar,
 // github.com/Sapd/HeadsetControl (headset voltage calibration).
+// PRO X3 SUPERSTRIKE collections and receiver slots: github.com/AprilNEA/OpenLogi/pull/2191.
 #include "drivers.h"
 
 #include <cwctype>
@@ -17,6 +18,9 @@
 namespace {
 
 constexpr BYTE kSwId = 0x0D;  // our software id; replies to other apps (G HUB, Options+) carry theirs
+constexpr USHORT kSuperstrikeReceiver = 0xC54F;
+constexpr USHORT kSuperstrikeWired = 0xC0A9;
+constexpr USHORT kProXWireless = 0x0ABA;
 
 class Hidpp {
 public:
@@ -86,7 +90,15 @@ int LiIonPercent(int mv) {
 }
 
 // Voltage -> % for G headsets (calibration from HeadsetControl).
-int HeadsetPercent(USHORT pid, int mv) {
+int HeadsetPercent(USHORT pid, int mv, bool charging) {
+    if (pid == kProXWireless && !charging) {
+        // Sampled from the G HUB PRO X Wireless discharge profile (voltage vs. consumed mAh).
+        static const int v[] = {4102, 4046, 3993, 3950, 3916, 3877, 3838, 3809, 3789, 3772, 3759, 3747,
+                                3736, 3722, 3707, 3687, 3661, 3644, 3550, 3426, 3348, 3293};
+        static const int p[] = {100, 95, 90, 85, 80, 75, 70, 65, 60, 55, 50, 45,
+                                 40, 35, 30, 25, 20, 15, 10, 5, 2, 0};
+        return Interpolate(mv, v, p, ARRAYSIZE(v));
+    }
     static const int g533v[] = { 4200, 3850, 3790, 3750, 3680, 3330 }, g533p[] = { 100, 50, 30, 20, 5, 0 };
     static const int g535v[] = { 4175, 3817, 3766, 3730, 3664, 3310 }, g535p[] = { 100, 50, 30, 20, 5, 0 };
     static const int g633v[] = { 4100, 3950, 3850, 3750, 3650, 3500, 3300, 3150 }, g633p[] = { 100, 80, 60, 40, 20, 10, 5, 0 };
@@ -96,7 +108,7 @@ int HeadsetPercent(USHORT pid, int mv) {
         case 0x0A66: return Interpolate(mv, g533v, g533p, 6);
         case 0x0AC4: return Interpolate(mv, g535v, g535p, 6);
         case 0x0A5C: case 0x0A89: case 0x0A5B: case 0x0A87: case 0x0AB5: case 0x0AFE: return Interpolate(mv, g633v, g633p, 8);
-        case 0x0AA7: case 0x0AAA: case 0x0ABA: case 0x0AFB: return Interpolate(mv, gprov, gprop, 6);
+        case 0x0AA7: case 0x0AAA: case kProXWireless: case 0x0AFB: return Interpolate(mv, gprov, gprop, 6);
         default: return Interpolate(mv, defv, defp, 6);
     }
 }
@@ -148,7 +160,7 @@ bool ReadBattery20(Hidpp& h, BYTE idx, USHORT pid, DeviceStatus& s) {
         if (h.Call(idx, f, 0, {}, p) && p.size() >= 3) {
             s.millivolts = (p[0] << 8) | p[1];
             s.charging = p[2] == 0x03;
-            if (s.millivolts) s.percent = HeadsetPercent(pid, s.millivolts);
+            if (s.millivolts) s.percent = HeadsetPercent(pid, s.millivolts, s.charging);
             return true;
         }
     }
@@ -202,16 +214,24 @@ bool ReadBattery10(Hidpp& h, BYTE idx, DeviceStatus& s) {
 
 void PollLogitech(PollContext& ctx) {
     for (auto [vid, pid] : ctx.Products(0x046D)) {
-        auto shorts = ctx.Find(vid, pid, [](const HidColl& c) { return c.page() == 0xFF00 && c.usage() == 0x0001 && c.outLen() == 7; });
+        auto shorts = ctx.Find(vid, pid, [](const HidColl& c) {
+            return c.outLen() == 7 &&
+                   ((c.page() == 0xFF00 && c.usage() == 0x0001) ||
+                    (c.page() == 0xFF43 && c.usage() == 0x0301));
+        });
         auto longs = ctx.Find(vid, pid, [](const HidColl& c) {
-            return ((c.page() == 0xFF00 && c.usage() == 0x0002) || (c.page() == 0xFF43 && c.usage() == 0x0202)) && c.outLen() == 20;
+            return c.outLen() == 20 &&
+                   ((c.page() == 0xFF00 && c.usage() == 0x0002) ||
+                    (c.page() == 0xFF43 && (c.usage() == 0x0202 || c.usage() == 0x0302)));
         });
         if (shorts.empty() && longs.empty()) continue;
         Hidpp h;
         if (!h.Open(shorts.empty() ? nullptr : shorts[0], longs.empty() ? nullptr : longs[0])) continue;
 
         std::wstring product = HidProduct(longs.empty() ? *shorts[0] : *longs[0]);
-        bool isReceiver = product.find(L"Receiver") != std::wstring::npos || product.find(L"USB Receiver") != std::wstring::npos;
+        // This receiver answers HID++ 2.0 at 0xFF itself. The mouse answers at a paired slot.
+        bool isReceiver = pid == kSuperstrikeReceiver || product.find(L"Receiver") != std::wstring::npos;
+        bool isSuperstrike = pid == kSuperstrikeReceiver || pid == kSuperstrikeWired;
 
         // A device answering a HID++ 2.0 ping at index 0xFF is connected directly (USB cable,
         // Bluetooth, or a receiver-less headset); otherwise it is a receiver with paired devices.
@@ -228,6 +248,7 @@ void PollLogitech(PollContext& ctx) {
             DeviceStatus s;
             s.key = L"logi:" + Hex4(pid) + L":" + std::to_wstring(idx);
             s.name = (idx == 0xFF && !product.empty()) ? product : L"Logitech wireless device";
+            if (isSuperstrike) s.name = L"Logitech PRO X3 SUPERSTRIKE";
             s.via = idx == 0xFF ? L"USB / Bluetooth" : L"Logitech receiver";
             s.graceSec = idx == 0xFF ? 0 : 1800;  // receiver devices drop off the link while sleeping
             s.kind = GuessKind(s.name);
@@ -237,12 +258,15 @@ void PollLogitech(PollContext& ctx) {
             if (r == 1 && p.size() >= 3 && p[0] >= 2) {
                 ReadNameAndType20(h, idx, s);
                 found = ReadBattery20(h, idx, pid, s);
-                if (found && s.kind == DeviceKind::Other && longs.size() && longs[0]->page() == 0xFF43) s.kind = DeviceKind::Headset;
+                if (found && s.kind == DeviceKind::Other && !longs.empty() &&
+                    longs[0]->page() == 0xFF43 && longs[0]->usage() == 0x0202) {
+                    s.kind = DeviceKind::Headset;
+                }
             } else if (r == 0 && err == 0x01) {  // "invalid sub id": a HID++ 1.0 device
                 found = ReadBattery10(h, idx, s);
             }
             if (found) {
-                if (s.kind == DeviceKind::Other) s.kind = GuessKind(s.name);
+                if (s.kind == DeviceKind::Other) s.kind = isSuperstrike ? DeviceKind::Mouse : GuessKind(s.name);
                 ctx.out.push_back(s);
                 any = true;
             }

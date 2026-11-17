@@ -4,7 +4,7 @@ WINDRES  ?= windres
 CXXFLAGS ?= -std=c++17 -Os -Wall -Wno-missing-field-initializers -ffunction-sections -fdata-sections \
             -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00
 LDFLAGS  ?= -municode -mwindows -static -s -Wl,--gc-sections
-LIBS     := -lhid -lsetupapi -lcfgmgr32 -lole32 -lcomctl32 -lgdi32 -lruntimeobject
+LIBS     := -lhid -lsetupapi -lcfgmgr32 -lole32 -lcomctl32 -lgdi32 -lruntimeobject -ldwmapi
 
 SRC := $(wildcard src/*.cpp) $(wildcard src/drivers/*.cpp)
 OBJ := $(patsubst src/%.cpp,build/%.o,$(SRC)) build/app_res.o
@@ -16,7 +16,9 @@ build/%.o: src/%.cpp $(wildcard src/*.h src/drivers/*.h)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -municode -c $< -o $@
 
-build/app_res.o: res/app.rc res/app.manifest res/app.ico
+build/main.o: res/options.h
+
+build/app_res.o: res/app.rc res/options.h res/app.manifest res/app.ico
 	@mkdir -p build
 	$(WINDRES) -i $< -o $@ --include-dir res
 
@@ -29,5 +31,7 @@ test:
 	./build/rapoo_protocol_test.exe
 	$(CXX) $(CXXFLAGS) tests/rapoo_driver_test.cpp src/drivers/rapoo.cpp -o build/rapoo_driver_test.exe
 	./build/rapoo_driver_test.exe
+	$(CXX) $(CXXFLAGS) tests/logitech_driver_test.cpp src/drivers/logitech.cpp -o build/logitech_driver_test.exe
+	./build/logitech_driver_test.exe
 
 .PHONY: clean test
