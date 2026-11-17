@@ -7,7 +7,8 @@ namespace {
 
 HWND g_wnd, g_taskbar, g_tip, g_notify, g_rebar;
 UINT g_clickMsg;
-bool g_light, g_hover;
+bool g_light, g_hover, g_desktop, g_dragging;
+POINT g_press{}, g_dragOrigin{};
 std::vector<WidgetItem> g_items;
 std::wstring g_tipText;
 RECT g_lastTray{}, g_lastBar{};
@@ -15,9 +16,12 @@ int g_lastW = -1, g_lastDpi = 0;
 SIZE g_size{};
 
 const wchar_t* kClass = L"WirelessBatteryWidget";
+const wchar_t* kSettings = L"Software\\WirelessBattery";
+const wchar_t* kDesktopPosition = L"DesktopWidgetPosition";
 
 int Dpi() {
-    UINT d = g_taskbar ? GetDpiForWindow(g_taskbar) : 0;
+    HWND window = g_desktop ? g_wnd : g_taskbar;
+    UINT d = window ? GetDpiForWindow(window) : 0;
     return d ? (int)d : 96;
 }
 int Px(int v) { return MulDiv(v, Dpi(), 96); }
@@ -122,15 +126,16 @@ std::vector<Piece> Layout(int& width) {
     Rgb fg = g_light ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 };
     Rgb red = g_light ? Rgb{ 196, 30, 40 } : Rgb{ 255, 90, 90 };
     Rgb charge = g_light ? Rgb{ 0, 120, 212 } : Rgb{ 96, 205, 255 };
-    HFONT icons = MakeFont(Px(16), FW_NORMAL, L"Segoe Fluent Icons", L"Segoe MDL2 Assets");
+    HFONT icons = MakeFont(Px(g_desktop ? 19 : 16), FW_NORMAL, L"Segoe Fluent Icons", L"Segoe MDL2 Assets");
     HFONT bolt = MakeFont(Px(11), FW_NORMAL, L"Segoe Fluent Icons", L"Segoe MDL2 Assets");
-    HFONT text = MakeFont(Px(13), FW_NORMAL, L"Segoe UI Variable Text", L"Segoe UI");
+    HFONT text = MakeFont(Px(g_desktop ? 17 : 13), g_desktop ? FW_SEMIBOLD : FW_NORMAL,
+                          L"Segoe UI Variable Text", L"Segoe UI");
 
     std::vector<Piece> out;
     if (g_items.empty()) out.push_back({ RenderMask(std::wstring(1, kBatteryUnknown), icons), fg, 110, 0 });
     for (size_t i = 0; i < g_items.size(); i++) {
         const auto& it = g_items[i];
-        int a = it.dim ? 120 : 255;
+        int a = it.dim ? (g_desktop ? 160 : 120) : 255;
         Rgb tc = it.low ? red : fg;
         out.push_back({ RenderMask(std::wstring(1, Glyph(it.kind, it.bluetooth)), icons), fg, a, Px(5) });
         std::wstring t = !it.text.empty() ? it.text : it.percent >= 0 ? std::to_wstring(it.percent) + L"%" : L"?";
@@ -142,28 +147,24 @@ std::vector<Piece> Layout(int& width) {
     DeleteObject(bolt);
     DeleteObject(text);
 
-    width = Px(8) * 2;
+    width = Px(g_desktop ? 15 : 8) * 2;
     for (auto& p : out) width += p.m.w + p.gapAfter;
     return out;
 }
 
-void Paint() {
-    if (!g_wnd) return;
-    RECT bar;
-    GetClientRect(g_taskbar, &bar);
-    int H = bar.bottom - bar.top;
+Canvas Render(int H) {
     int W = 0;
     auto pieces = Layout(W);
-    if (W <= 0 || H <= 0) return;
     Canvas cv(W, H);
 
-    // Nearly transparent background so the whole strip receives mouse input,
-    // plus a rounded hover highlight like the system tray icons have.
-    for (auto& p : cv.px) p = 0x01000000;
-    if (g_hover) {
-        int inset = Px(4), r = Px(4);
-        Rgb hc = g_light ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 };
-        int ha = g_light ? 20 : 26;
+    // The floating widget needs a readable surface over the desktop or other windows.
+    if (!g_desktop) std::fill(cv.px.begin(), cv.px.end(), 0x01000000);
+    if (g_desktop || g_hover) {
+        int inset = g_desktop ? 0 : Px(4);
+        int r = Px(g_desktop ? 11 : 4);
+        Rgb hc = g_desktop ? (g_light ? Rgb{ 248, 248, 249 } : Rgb{ 31, 32, 35 })
+                           : (g_light ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 });
+        int ha = g_desktop ? 255 : g_light ? 20 : 26;
         for (int y = inset; y < H - inset; y++)
             for (int x = 0; x < W; x++) {
                 int dx = x < r ? r - x : (x >= W - r ? x - (W - r - 1) : 0);
@@ -172,11 +173,22 @@ void Paint() {
             }
     }
 
-    int x = Px(8);
+    int x = Px(g_desktop ? 15 : 8);
     for (auto& p : pieces) {
         cv.Draw(p.m, x, (H - p.m.h) / 2, p.color, p.alpha);
         x += p.m.w + p.gapAfter;
     }
+    return cv;
+}
+
+void Paint() {
+    if (!g_wnd) return;
+    RECT bar{};
+    if (!g_desktop) GetClientRect(g_taskbar, &bar);
+    int H = g_desktop ? Px(44) : bar.bottom - bar.top;
+    if (H <= 0) return;
+    Canvas cv = Render(H);
+    int W = cv.w;
 
     HDC screen = GetDC(nullptr);
     HDC mem = CreateCompatibleDC(screen);
@@ -198,9 +210,42 @@ void Paint() {
     g_lastW = -1;  // force a re-position with the new size
 }
 
+void PlaceDesktop(POINT position) {
+    MONITORINFO monitor{ sizeof(monitor) };
+    if (GetMonitorInfoW(MonitorFromPoint(position, MONITOR_DEFAULTTONEAREST), &monitor)) {
+        const RECT& area = monitor.rcWork;
+        position.x = std::clamp(position.x, area.left, std::max(area.left, area.right - g_size.cx));
+        position.y = std::clamp(position.y, area.top, std::max(area.top, area.bottom - g_size.cy));
+    }
+    RECT current{};
+    GetWindowRect(g_wnd, &current);
+    if (current.left != position.x || current.top != position.y) {
+        SetWindowPos(g_wnd, nullptr, position.x, position.y, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+    }
+}
+
 LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+        case WM_LBUTTONDOWN:
+            if (g_desktop) {
+                RECT bounds{};
+                GetWindowRect(h, &bounds);
+                g_dragOrigin = {bounds.left, bounds.top};
+                GetCursorPos(&g_press);
+                SetCapture(h);
+            }
+            return 0;
         case WM_MOUSEMOVE:
+            if (g_desktop && GetCapture() == h) {
+                POINT cursor{};
+                GetCursorPos(&cursor);
+                LONG dx = cursor.x - g_press.x, dy = cursor.y - g_press.y;
+                g_dragging = g_dragging || labs(dx) >= GetSystemMetrics(SM_CXDRAG) ||
+                                          labs(dy) >= GetSystemMetrics(SM_CYDRAG);
+                if (g_dragging) PlaceDesktop({g_dragOrigin.x + dx, g_dragOrigin.y + dy});
+                return 0;
+            }
+            if (g_desktop) return 0;
             if (!g_hover) {
                 g_hover = true;
                 TRACKMOUSEEVENT t{ sizeof(t), TME_LEAVE, h, 0 };
@@ -215,8 +260,22 @@ LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             widget::Reposition();
             return 0;
         case WM_LBUTTONUP:
+            if (g_desktop && g_dragging) {
+                RECT bounds{};
+                GetWindowRect(h, &bounds);
+                POINT pos{bounds.left, bounds.top};
+                RegSetKeyValueW(HKEY_CURRENT_USER, kSettings, kDesktopPosition, REG_BINARY, &pos, sizeof(pos));
+                ReleaseCapture();
+                return 0;
+            }
+            if (g_desktop && GetCapture() == h) ReleaseCapture();
+            PostMessageW(g_notify, g_clickMsg, 0, 0);
+            return 0;
         case WM_RBUTTONUP:
             PostMessageW(g_notify, g_clickMsg, 0, 0);
+            return 0;
+        case WM_CAPTURECHANGED:
+            g_dragging = false;
             return 0;
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
@@ -228,18 +287,26 @@ LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 
 namespace widget {
 
-bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme) {
+bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme, bool desktop) {
     Destroy();
-    g_taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
-    if (!g_taskbar || !FindWindowExW(g_taskbar, nullptr, L"TrayNotifyWnd", nullptr)) { g_taskbar = nullptr; return false; }
-    RECT tb;
-    GetWindowRect(g_taskbar, &tb);
-    if (tb.bottom - tb.top > tb.right - tb.left) { g_taskbar = nullptr; return false; }  // vertical taskbar: use tray icons
-    // Windows 11's taskbar is a XAML island; on Windows 10 the task buttons live in ReBarWindow32
-    // and have to be narrowed so they never slide under the widget.
-    g_rebar = FindWindowExW(g_taskbar, nullptr, L"Windows.UI.Composition.DesktopWindowContentBridge", nullptr)
-                  ? nullptr
-                  : FindWindowExW(g_taskbar, nullptr, L"ReBarWindow32", nullptr);
+    g_desktop = desktop;
+    if (!desktop) {
+        g_taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+        if (!g_taskbar || !FindWindowExW(g_taskbar, nullptr, L"TrayNotifyWnd", nullptr)) {
+            g_taskbar = nullptr;
+            return false;
+        }
+        RECT tb{};
+        GetWindowRect(g_taskbar, &tb);
+        if (tb.bottom - tb.top > tb.right - tb.left) {
+            g_taskbar = nullptr;
+            return false;  // vertical taskbar: use tray icons
+        }
+        // Windows 11 uses XAML, while Windows 10's ReBarWindow32 needs space reserved.
+        g_rebar = FindWindowExW(g_taskbar, nullptr, L"Windows.UI.Composition.DesktopWindowContentBridge", nullptr)
+                      ? nullptr
+                      : FindWindowExW(g_taskbar, nullptr, L"ReBarWindow32", nullptr);
+    }
     g_notify = notifyWnd;
     g_clickMsg = clickMsg;
     g_light = lightTheme;
@@ -253,8 +320,11 @@ bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme) {
         wc.lpszClassName = kClass;
         registered = RegisterClassExW(&wc) != 0;
     }
-    g_wnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_NOACTIVATE, kClass, L"", WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 1, 1,
-                            g_taskbar, nullptr, inst, nullptr);
+    DWORD exStyle = WS_EX_LAYERED | WS_EX_NOACTIVATE;
+    if (desktop) exStyle |= WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
+    g_wnd = CreateWindowExW(exStyle, kClass, desktop ? L"Mouse and headset battery" : L"",
+                            desktop ? WS_POPUP : WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 1, 1,
+                            desktop ? notifyWnd : g_taskbar, nullptr, inst, nullptr);
     if (!g_wnd) { g_taskbar = nullptr; return false; }
 
     INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_WIN95_CLASSES };
@@ -273,7 +343,19 @@ bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme) {
     g_lastDpi = Dpi();
     Paint();
     g_lastW = -1;
-    Reposition();
+    if (desktop) {
+        POINT position{};
+        DWORD size = sizeof(position);
+        if (RegGetValueW(HKEY_CURRENT_USER, kSettings, kDesktopPosition, RRF_RT_REG_BINARY,
+                         nullptr, &position, &size) != ERROR_SUCCESS || size != sizeof(position)) {
+            RECT work{};
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+            position = {work.right - g_size.cx - Px(20), work.bottom - g_size.cy - Px(20)};
+        }
+        PlaceDesktop(position);
+    } else {
+        Reposition();
+    }
     ShowWindow(g_wnd, SW_SHOWNOACTIVATE);
     return true;
 }
@@ -290,9 +372,12 @@ void Destroy() {
     if (g_wnd) { DestroyWindow(g_wnd); g_wnd = nullptr; }
     g_taskbar = nullptr;
     g_hover = false;
+    g_dragging = false;
+    g_tipText.clear();
 }
 
-bool Alive() { return g_wnd && IsWindow(g_wnd) && g_taskbar && IsWindow(g_taskbar); }
+bool Alive() { return g_wnd && IsWindow(g_wnd) && (g_desktop || (g_taskbar && IsWindow(g_taskbar))); }
+bool IsDesktop() { return g_desktop; }
 
 void SetItems(const std::vector<WidgetItem>& items, const std::wstring& tooltip) {
     g_items = items;
@@ -316,6 +401,12 @@ void SetLightTheme(bool light) {
 bool Reposition() {
     if (!Alive()) return false;
     if (Dpi() != g_lastDpi) { g_lastDpi = Dpi(); Paint(); }
+    if (g_desktop) {
+        RECT bounds{};
+        GetWindowRect(g_wnd, &bounds);
+        PlaceDesktop({bounds.left, bounds.top});
+        return true;
+    }
     HWND tray = FindWindowExW(g_taskbar, nullptr, L"TrayNotifyWnd", nullptr);
     if (!tray) return true;
     RECT tr, bar;

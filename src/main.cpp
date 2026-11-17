@@ -4,9 +4,13 @@
 #include <dbt.h>
 #include <initguid.h>
 #include <hidclass.h>
+#include <commctrl.h>
+#include <dwmapi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
+#include <cwctype>
 #include <map>
 #include <set>
 #include <string>
@@ -14,6 +18,7 @@
 
 #include "devices.h"
 #include "widget.h"
+#include "../res/options.h"
 
 namespace {
 
@@ -22,11 +27,13 @@ constexpr UINT WM_RESULTS = WM_APP + 2;
 constexpr UINT WM_WIDGET_CLICK = WM_APP + 3;
 constexpr UINT_PTR TIMER_DEBOUNCE = 1;
 constexpr UINT_PTR TIMER_WIDGET = 2;
-constexpr DWORD POLL_INTERVAL_MS = 60 * 1000;
-constexpr int LOW_BATTERY = 15;
+constexpr DWORD DEFAULT_POLL_SECONDS = 60;
+constexpr DWORD DEFAULT_LOW_BATTERY = 15;
+constexpr DWORD POLL_SECONDS[] = {30, 60, 120, 300};
+constexpr DWORD LOW_BATTERY_LEVELS[] = {5, 10, 15, 20, 25, 30};
 constexpr UINT PLACEHOLDER_ID = 1;
 
-enum MenuId : UINT { ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_DEVICE_FIRST = 1000 };
+enum MenuId : UINT { ID_REFRESH = 100, ID_OPTIONS, ID_EXIT, ID_DEVICE_FIRST = 1000 };
 
 const wchar_t* kAppName = L"Wireless Battery";
 const wchar_t* kRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -39,9 +46,13 @@ HWND g_hwnd;
 HANDLE g_refreshEvt, g_stopEvt, g_worker;
 UINT g_taskbarCreatedMsg;
 bool g_lightTaskbar;
-bool g_wantWidget = true;      // user's choice: taskbar widget (default) or tray icons
+enum DisplayMode : DWORD { TrayIcons, TaskbarWidget, DesktopWidget };
+DisplayMode g_displayMode = TaskbarWidget;
 bool g_useWidget = false;      // what is actually shown right now
 bool g_hideLastKnown = false;  // hide (last known) / asleep devices from taskbar and tray
+std::atomic<DWORD> g_pollSeconds{DEFAULT_POLL_SECONDS};
+int g_lowBattery = DEFAULT_LOW_BATTERY;
+bool g_trayAlerts = true;
 
 struct TrayEntry {
     UINT uid = 0;
@@ -105,21 +116,22 @@ bool IsEntryHidden(const TrayEntry& e) {
     return IsHidden(e.st.key) || (g_hideLastKnown && (e.st.asleep || (e.st.percent < 0 && e.lastPct >= 0)));
 }
 
-bool LoadBoolSetting(const wchar_t* name, bool defaultVal) {
-    DWORD v = defaultVal ? 1 : 0, sz = sizeof(v);
-    RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, name, RRF_RT_REG_DWORD, nullptr, &v, &sz);
-    return v != 0;
+DWORD LoadSetting(const wchar_t* name, DWORD fallback) {
+    DWORD value, size = sizeof(value);
+    return RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, name, RRF_RT_REG_DWORD,
+                        nullptr, &value, &size) == ERROR_SUCCESS ? value : fallback;
 }
 
-void SaveBoolSetting(const wchar_t* name, bool on) {
-    DWORD v = on ? 1 : 0;
-    RegSetKeyValueW(HKEY_CURRENT_USER, kSettingsKey, name, REG_DWORD, &v, sizeof(v));
+bool SaveSetting(const wchar_t* name, DWORD value) {
+    return RegSetKeyValueW(HKEY_CURRENT_USER, kSettingsKey, name, REG_DWORD,
+                           &value, sizeof(value)) == ERROR_SUCCESS;
 }
 
-bool LoadWidgetMode() { return LoadBoolSetting(L"TaskbarWidget", true); }
-void SaveWidgetMode(bool on) { SaveBoolSetting(L"TaskbarWidget", on); }
-bool LoadHideLastKnown() { return LoadBoolSetting(L"HideLastKnownDevices", false); }
-void SaveHideLastKnown(bool on) { SaveBoolSetting(L"HideLastKnownDevices", on); }
+template <size_t N>
+DWORD LoadPreset(const wchar_t* name, DWORD fallback, const DWORD (&values)[N]) {
+    DWORD value = LoadSetting(name, fallback);
+    return std::find(values, values + N, value) != values + N ? value : fallback;
+}
 
 bool AutostartEnabled() {
     wchar_t buf[MAX_PATH * 2];
@@ -128,16 +140,18 @@ bool AutostartEnabled() {
     return _wcsicmp(buf, (L"\"" + ExePath() + L"\"").c_str()) == 0;
 }
 
-void SetAutostart(bool on) {
+bool SetAutostart(bool on) {
     HKEY k;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_SET_VALUE, &k) != ERROR_SUCCESS) return;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_SET_VALUE, &k) != ERROR_SUCCESS) return false;
+    LSTATUS result;
     if (on) {
         std::wstring v = L"\"" + ExePath() + L"\"";
-        RegSetValueExW(k, kRunValue, 0, REG_SZ, (const BYTE*)v.c_str(), (DWORD)((v.size() + 1) * sizeof(wchar_t)));
+        result = RegSetValueExW(k, kRunValue, 0, REG_SZ, (const BYTE*)v.c_str(), (DWORD)((v.size() + 1) * sizeof(wchar_t)));
     } else {
-        RegDeleteValueW(k, kRunValue);
+        result = RegDeleteValueW(k, kRunValue);
     }
     RegCloseKey(k);
+    return result == ERROR_SUCCESS || (!on && result == ERROR_FILE_NOT_FOUND);
 }
 
 // ---- icon rendering ---------------------------------------------------------------------------
@@ -243,10 +257,10 @@ Rgb Foreground() { return g_lightTaskbar ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 }
 HICON IconFor(int pct, bool charging, bool dim) {
     Rgb fg = Foreground();
     Rgb bar = charging        ? Rgb{ 0, 170, 255 }
-            : pct <= LOW_BATTERY ? Rgb{ 232, 32, 48 }
+            : pct <= g_lowBattery ? Rgb{ 232, 32, 48 }
             : pct <= 30       ? Rgb{ 255, 150, 0 }
                               : Rgb{ 30, 190, 90 };
-    Rgb text = (!charging && pct >= 0 && pct <= LOW_BATTERY) ? Rgb{ 240, 50, 60 } : fg;
+    Rgb text = (!charging && pct >= 0 && pct <= g_lowBattery) ? Rgb{ 240, 50, 60 } : fg;
     std::wstring t = pct < 0 ? L"?" : std::to_wstring(pct);
     return RenderIcon(t, pct, text, bar, dim);
 }
@@ -269,6 +283,10 @@ std::wstring StatusText(const TrayEntry& e) {
     if (s.charging) t += L", charging";
     if (s.asleep) t += L", asleep";
     return t;
+}
+
+std::wstring DeviceDetails(const TrayEntry& e) {
+    return e.st.via.empty() ? StatusText(e) : StatusText(e) + L"  [" + e.st.via + L"]";
 }
 
 void TrayCall(DWORD msg, UINT uid, HICON icon, const std::wstring& tip, const wchar_t* infoTitle = nullptr,
@@ -332,12 +350,12 @@ void ApplyEntry(TrayEntry& e) {
         e.icon = IconFor(shown, s.charging, dim);
         e.iconSig = sig;
     }
-    std::wstring tip = s.name + L"\n" + StatusText(e);
+    std::wstring tip = s.name + L"\n" + DeviceDetails(e);
 
     const wchar_t* infoTitle = nullptr;
     std::wstring info;
-    if (s.charging || shown > LOW_BATTERY + 10) e.lowWarned = false;
-    if (!s.charging && s.percent >= 0 && s.percent <= LOW_BATTERY && !e.lowWarned) {
+    if (s.charging || shown > g_lowBattery + 10) e.lowWarned = false;
+    if (g_trayAlerts && !s.charging && s.percent >= 0 && s.percent <= g_lowBattery && !e.lowWarned) {
         e.lowWarned = true;
         infoTitle = L"Low battery";
         info = s.name + L" is at " + std::to_wstring(s.percent) + L"%";
@@ -367,6 +385,15 @@ void UpdateWidget() {
     });
     std::vector<WidgetItem> items;
     std::wstring tip;
+    auto appendTip = [&](const std::wstring& line) {
+        if (!tip.empty()) tip += L"\n";
+        tip += line;
+    };
+    if (g_displayMode == DesktopWidget) {
+        list.erase(std::remove_if(list.begin(), list.end(), [](const TrayEntry* e) {
+            return e->st.kind != DeviceKind::Headset && e->st.kind != DeviceKind::Mouse;
+        }), list.end());
+    }
     for (auto* e : list) {
         WidgetItem it;
         it.kind = e->st.kind;
@@ -374,11 +401,26 @@ void UpdateWidget() {
         if (e->st.percent >= 0) it.text = e->st.levelText;
         it.charging = e->st.charging;
         it.dim = e->st.percent < 0;
-        it.low = !it.charging && it.percent >= 0 && it.percent <= LOW_BATTERY;
+        it.low = !it.charging && it.percent >= 0 && it.percent <= g_lowBattery;
         it.bluetooth = e->st.via == L"Bluetooth";
         items.push_back(it);
-        if (!tip.empty()) tip += L"\n";
-        tip += e->st.name + L": " + StatusText(*e);
+        appendTip(e->st.name + L": " + DeviceDetails(*e));
+    }
+    if (g_displayMode == DesktopWidget) {
+        for (auto kind : {DeviceKind::Headset, DeviceKind::Mouse}) {
+            if (std::any_of(items.begin(), items.end(), [=](const WidgetItem& it) { return it.kind == kind; }))
+                continue;
+            WidgetItem missing;
+            missing.kind = kind;
+            missing.text = L"\u2014";
+            missing.dim = true;
+            items.push_back(missing);
+            appendTip(kind == DeviceKind::Headset ? L"Headset: no visible battery reading" :
+                                                   L"Mouse: no visible battery reading");
+        }
+        std::stable_sort(items.begin(), items.end(), [](const WidgetItem& a, const WidgetItem& b) {
+            return KindOrder(a.kind) < KindOrder(b.kind);
+        });
     }
     if (tip.empty()) tip = L"Wireless Battery: no devices with battery info found";
     widget::SetItems(items, tip);
@@ -420,32 +462,27 @@ void OnResults(std::vector<DeviceStatus>& results) {
 // Makes the actual display match the chosen mode; falls back to tray icons if the taskbar
 // widget cannot be created (e.g. Explorer not ready yet). Called once a second.
 void Reconcile() {
-    bool alive = g_wantWidget && widget::Alive();
-    if (g_wantWidget && !alive) alive = widget::Create(g_inst, g_hwnd, WM_WIDGET_CLICK, g_lightTaskbar);
-    if (!g_wantWidget) widget::Destroy();
+    bool desktop = g_displayMode == DesktopWidget;
+    bool alive = widget::Alive();
+    bool created = false;
+    if (g_displayMode == TrayIcons) {
+        widget::Destroy();
+        alive = false;
+    } else if (!alive || widget::IsDesktop() != desktop) {
+        alive = widget::Create(g_inst, g_hwnd, WM_WIDGET_CLICK, g_lightTaskbar, desktop);
+        created = alive;
+    }
     bool changed = alive != g_useWidget;
     g_useWidget = alive;
     if (changed) {
         for (auto& [k, e] : g_entries) ApplyEntry(e);
         UpdatePlaceholder();
+    }
+    if (created) {
         UpdateWidget();
     } else if (g_useWidget) {
         widget::Reposition();
     }
-}
-
-void SetMode(bool useWidget) {
-    g_wantWidget = useWidget;
-    SaveWidgetMode(useWidget);
-    Reconcile();
-}
-
-void SetHideLastKnown(bool on) {
-    g_hideLastKnown = on;
-    SaveHideLastKnown(on);
-    for (auto& [k, e] : g_entries) ApplyEntry(e);
-    UpdatePlaceholder();
-    UpdateWidget();
 }
 
 void ReAddAll() {
@@ -464,38 +501,364 @@ void RedrawAll() {
     UpdatePlaceholder();
 }
 
+void AddChoice(HWND dialog, int control, const wchar_t* label, DWORD value, DWORD selected) {
+    LRESULT index = SendDlgItemMessageW(dialog, control, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+    if (index < 0) return;
+    SendDlgItemMessageW(dialog, control, CB_SETITEMDATA, index, value);
+    if (value == selected) SendDlgItemMessageW(dialog, control, CB_SETCURSEL, index, 0);
+}
+
+DWORD ReadChoice(HWND dialog, int control, DWORD fallback) {
+    LRESULT index = SendDlgItemMessageW(dialog, control, CB_GETCURSEL, 0, 0);
+    if (index == CB_ERR) return fallback;
+    LRESULT value = SendDlgItemMessageW(dialog, control, CB_GETITEMDATA, index, 0);
+    return value == CB_ERR ? fallback : static_cast<DWORD>(value);
+}
+
+constexpr COLORREF kSurface = RGB(25, 29, 36);
+constexpr COLORREF kInk = RGB(225, 230, 237);
+constexpr COLORREF kAccent = RGB(158, 186, 220);
+constexpr COLORREF kField = RGB(36, 42, 52);
+constexpr COLORREF kLine = RGB(66, 76, 89);
+constexpr COLORREF kSelection = RGB(46, 60, 78);
+
+void FillArea(HDC dc, const RECT& area, COLORREF color) {
+    SetDCBrushColor(dc, color);
+    FillRect(dc, &area, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+}
+
+bool HighContrast() {
+    HIGHCONTRASTW settings{sizeof(settings)};
+    return SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(settings), &settings, 0) &&
+           (settings.dwFlags & HCF_HIGHCONTRASTON);
+}
+
+std::wstring ChoiceLabel(HWND combo, LRESULT index) {
+    LRESULT length = index == CB_ERR ? CB_ERR : SendMessageW(combo, CB_GETLBTEXTLEN, index, 0);
+    if (length == CB_ERR) return {};
+    std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+    SendMessageW(combo, CB_GETLBTEXT, index, reinterpret_cast<LPARAM>(text.data()));
+    text.resize(static_cast<size_t>(length));
+    return text;
+}
+
+void PaintOptionControl(HWND control, HDC dc, bool combo) {
+    RECT bounds{};
+    GetClientRect(control, &bounds);
+    auto px = [&](int value) { return MulDiv(value, GetDpiForWindow(control), 96); };
+    int id = GetDlgCtrlID(control);
+    bool action = id == IDOK || id == IDCANCEL;
+    bool focus = GetFocus() == control;
+    bool pressed = !combo && (SendMessageW(control, BM_GETSTATE, 0, 0) & BST_PUSHED);
+    int state = SaveDC(dc);
+    FillArea(dc, bounds, combo || action ? (pressed || id == IDOK ? kSelection : kField) : kSurface);
+    SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(control, WM_GETFONT, 0, 0)));
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, kInk);
+    RECT label = bounds;
+    if (combo || action) {
+        SetDCBrushColor(dc, focus || id == IDOK ? kAccent : kLine);
+        FrameRect(dc, &bounds, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+    }
+    if (combo) {
+        label.left += px(8);
+        label.right -= px(20);
+        SetTextColor(dc, kAccent);
+        RECT arrow{label.right, bounds.top, bounds.right - px(4), bounds.bottom};
+        DrawTextW(dc, L"\u2304", -1, &arrow, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+        SetTextColor(dc, kInk);
+        auto text = ChoiceLabel(control, SendMessageW(control, CB_GETCURSEL, 0, 0));
+        DrawTextW(dc, text.c_str(), -1, &label, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+    } else {
+        wchar_t text[128]{};
+        GetWindowTextW(control, text, ARRAYSIZE(text));
+        if (!action) {
+            int top = (bounds.bottom - px(13)) / 2;
+            RECT mark{bounds.left, top, bounds.left + px(13), top + px(13)};
+            bool checked = SendMessageW(control, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            bool radio = (GetWindowLongPtrW(control, GWL_STYLE) & BS_TYPEMASK) == BS_AUTORADIOBUTTON;
+            SelectObject(dc, GetStockObject(DC_PEN));
+            SelectObject(dc, GetStockObject(DC_BRUSH));
+            SetDCPenColor(dc, checked ? kAccent : kLine);
+            SetDCBrushColor(dc, checked && !radio ? kAccent : kField);
+            if (radio) {
+                Ellipse(dc, mark.left, mark.top, mark.right, mark.bottom);
+                if (checked) {
+                    SetDCBrushColor(dc, kAccent);
+                    Ellipse(dc, mark.left + px(4), mark.top + px(4), mark.right - px(4), mark.bottom - px(4));
+                }
+            } else {
+                Rectangle(dc, mark.left, mark.top, mark.right, mark.bottom);
+                if (checked) {
+                    SetTextColor(dc, kSurface);
+                    DrawTextW(dc, L"\u2713", -1, &mark, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+                    SetTextColor(dc, kInk);
+                }
+            }
+            label.left += px(19);
+        }
+        UINT flags = DT_SINGLELINE | DT_VCENTER | (action ? DT_CENTER : DT_LEFT);
+        if (SendMessageW(control, WM_QUERYUISTATE, 0, 0) & UISF_HIDEACCEL) flags |= DT_HIDEPREFIX;
+        DrawTextW(dc, text, -1, &label, flags);
+        if (focus && !(SendMessageW(control, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS)) {
+            InflateRect(&label, -px(2), -px(2));
+            DrawFocusRect(dc, &label);
+        }
+    }
+    if (state) RestoreDC(dc, state);
+}
+
+LRESULT CALLBACK OptionControlProc(HWND control, UINT message, WPARAM wp, LPARAM lp,
+                                  UINT_PTR subclass, DWORD_PTR combo) {
+    if (message == WM_NCDESTROY) RemoveWindowSubclass(control, OptionControlProc, subclass);
+    if (!HighContrast()) {
+        if (message == WM_ERASEBKGND) return TRUE;
+        if (message == WM_PAINT) {
+            PAINTSTRUCT paint{};
+            HDC dc = BeginPaint(control, &paint);
+            PaintOptionControl(control, dc, combo != 0);
+            EndPaint(control, &paint);
+            return 0;
+        }
+        if (message == WM_PRINTCLIENT) {
+            PaintOptionControl(control, reinterpret_cast<HDC>(wp), combo != 0);
+            return 0;
+        }
+    }
+    LRESULT result = DefSubclassProc(control, message, wp, lp);
+    switch (message) {
+        case BM_SETCHECK: case BM_SETSTATE: case CB_SETCURSEL:
+        case WM_SETFOCUS: case WM_KILLFOCUS: case WM_UPDATEUISTATE:
+        case WM_KEYDOWN: case WM_KEYUP: case WM_LBUTTONDOWN: case WM_LBUTTONUP:
+            InvalidateRect(control, nullptr, FALSE);
+            break;
+    }
+    return result;
+}
+
+INT_PTR CALLBACK OptionsProc(HWND dialog, UINT message, WPARAM wp, LPARAM lp) {
+    if (message == WM_INITDIALOG) {
+        BOOL dark = !HighContrast();
+        DwmSetWindowAttribute(dialog, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+        if (dark) {
+            DwmSetWindowAttribute(dialog, DWMWA_CAPTION_COLOR, &kSurface, sizeof(kSurface));
+            DwmSetWindowAttribute(dialog, DWMWA_TEXT_COLOR, &kInk, sizeof(kInk));
+        }
+        HFONT heading = CreateFontW(-MulDiv(9, GetDpiForWindow(dialog), 72), 0, 0, 0, FW_SEMIBOLD,
+                                    0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        if (heading) {
+            SetWindowLongPtrW(dialog, DWLP_USER, reinterpret_cast<LONG_PTR>(heading));
+            SendDlgItemMessageW(dialog, IDC_OPTIONS_TITLE, WM_SETFONT, reinterpret_cast<WPARAM>(heading), FALSE);
+            SendDlgItemMessageW(dialog, IDC_OPTIONS_MONITORING, WM_SETFONT, reinterpret_cast<WPARAM>(heading), FALSE);
+        }
+        for (int id : {IDC_MODE_TASKBAR, IDC_MODE_DESKTOP, IDC_MODE_TRAY, IDC_HIDE_ASLEEP,
+                       IDC_TRAY_ALERTS, IDC_START_WITH_WINDOWS, IDOK, IDCANCEL,
+                       IDC_POLL_INTERVAL, IDC_LOW_BATTERY}) {
+            SetWindowSubclass(GetDlgItem(dialog, id), OptionControlProc, 1,
+                              id == IDC_POLL_INTERVAL || id == IDC_LOW_BATTERY);
+        }
+        int display = g_displayMode == DesktopWidget ? IDC_MODE_DESKTOP :
+                      g_displayMode == TrayIcons ? IDC_MODE_TRAY : IDC_MODE_TASKBAR;
+        CheckRadioButton(dialog, IDC_MODE_TASKBAR, IDC_MODE_TRAY, display);
+        for (DWORD seconds : POLL_SECONDS) {
+            std::wstring label = std::to_wstring(seconds < 60 ? seconds : seconds / 60)
+                               + (seconds < 60 ? L" sec" : L" min");
+            AddChoice(dialog, IDC_POLL_INTERVAL, label.c_str(), seconds, g_pollSeconds.load());
+        }
+        for (DWORD level : LOW_BATTERY_LEVELS) {
+            std::wstring label = std::to_wstring(level) + L"%";
+            AddChoice(dialog, IDC_LOW_BATTERY, label.c_str(), level, g_lowBattery);
+        }
+        CheckDlgButton(dialog, IDC_HIDE_ASLEEP, g_hideLastKnown ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dialog, IDC_TRAY_ALERTS, g_trayAlerts ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dialog, IDC_START_WITH_WINDOWS, AutostartEnabled() ? BST_CHECKED : BST_UNCHECKED);
+        return TRUE;
+    }
+    if (message == WM_NCDESTROY) {
+        HFONT heading = reinterpret_cast<HFONT>(GetWindowLongPtrW(dialog, DWLP_USER));
+        if (heading) DeleteObject(heading);
+    }
+    if (message == WM_DRAWITEM) {
+        auto& draw = *reinterpret_cast<const DRAWITEMSTRUCT*>(lp);
+        if (draw.CtlType != ODT_COMBOBOX) return FALSE;
+        bool selected = draw.itemState & ODS_SELECTED;
+        bool contrast = HighContrast();
+        FillArea(draw.hDC, draw.rcItem, contrast ? GetSysColor(selected ? COLOR_HIGHLIGHT : COLOR_WINDOW) :
+                                                 selected ? kSelection : kField);
+        SetTextColor(draw.hDC, contrast ? GetSysColor(selected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT) : kInk);
+        SetBkMode(draw.hDC, TRANSPARENT);
+        RECT label = draw.rcItem;
+        label.left += MulDiv(7, GetDpiForWindow(dialog), 96);
+        auto text = ChoiceLabel(draw.hwndItem, draw.itemID == UINT_MAX ? CB_ERR : static_cast<LRESULT>(draw.itemID));
+        DrawTextW(draw.hDC, text.c_str(), -1, &label, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        if (draw.itemState & ODS_FOCUS) DrawFocusRect(draw.hDC, &draw.rcItem);
+        return TRUE;
+    }
+    if ((message == WM_CTLCOLORDLG || message == WM_CTLCOLORSTATIC || message == WM_CTLCOLORLISTBOX) && !HighContrast()) {
+        HDC dc = reinterpret_cast<HDC>(wp);
+        SetDCBrushColor(dc, message == WM_CTLCOLORLISTBOX ? kField : kSurface);
+        SetBkMode(dc, TRANSPARENT);
+        int id = GetDlgCtrlID(reinterpret_cast<HWND>(lp));
+        SetTextColor(dc, id == IDC_OPTIONS_TITLE || id == IDC_OPTIONS_MONITORING ? kAccent : kInk);
+        return reinterpret_cast<INT_PTR>(GetStockObject(DC_BRUSH));
+    }
+    if (message == WM_COMMAND && HIWORD(wp) == CBN_SELCHANGE && lp)
+        InvalidateRect(reinterpret_cast<HWND>(lp), nullptr, FALSE);
+    if (message == WM_CLOSE || (message == WM_COMMAND && LOWORD(wp) == IDCANCEL)) {
+        EndDialog(dialog, IDCANCEL);
+        return TRUE;
+    }
+    if (message != WM_COMMAND || LOWORD(wp) != IDOK) return FALSE;
+
+    bool saved = true;
+    auto save = [&](const wchar_t* name, DWORD current, DWORD requested) {
+        if (current == requested || SaveSetting(name, requested)) return requested;
+        saved = false;
+        return current;
+    };
+    auto checked = [&](int control) { return IsDlgButtonChecked(dialog, control) == BST_CHECKED; };
+
+    DWORD mode = checked(IDC_MODE_DESKTOP) ? DesktopWidget :
+                 checked(IDC_MODE_TRAY) ? TrayIcons : TaskbarWidget;
+    g_displayMode = static_cast<DisplayMode>(save(L"DisplayMode", g_displayMode, mode));
+    g_hideLastKnown = save(L"HideLastKnownDevices", g_hideLastKnown, checked(IDC_HIDE_ASLEEP)) != 0;
+    int previousLevel = g_lowBattery;
+    bool previousAlerts = g_trayAlerts;
+    g_lowBattery = static_cast<int>(save(L"LowBatteryThreshold", g_lowBattery,
+                                       ReadChoice(dialog, IDC_LOW_BATTERY, g_lowBattery)));
+    g_trayAlerts = save(L"TrayBatteryAlerts", g_trayAlerts, checked(IDC_TRAY_ALERTS)) != 0;
+    if (previousLevel != g_lowBattery || previousAlerts != g_trayAlerts) {
+        for (auto& [key, entry] : g_entries) entry.lowWarned = false;
+    }
+
+    DWORD previousPoll = g_pollSeconds.load();
+    DWORD poll = save(L"PollIntervalSeconds", previousPoll, ReadChoice(dialog, IDC_POLL_INTERVAL, previousPoll));
+    if (poll != previousPoll) {
+        g_pollSeconds.store(poll);
+        SetEvent(g_refreshEvt);
+    }
+
+    bool autostart = checked(IDC_START_WITH_WINDOWS);
+    if (autostart != AutostartEnabled() && !SetAutostart(autostart)) saved = false;
+
+    Reconcile();
+    RedrawAll();
+    UpdateWidget();
+    if (saved) {
+        EndDialog(dialog, IDOK);
+    } else {
+        MessageBoxW(dialog, L"Some options could not be saved. Try Save again to retry those changes.",
+                    kAppName, MB_OK | MB_ICONWARNING);
+    }
+    return TRUE;
+}
+
+enum class MenuRowKind { Action, Device, Heading, Divider };
+
+struct MenuRow {
+    MenuRowKind kind;
+    UINT id = 0;
+    std::wstring label;
+    std::wstring detail;
+    bool checked = false;
+    bool low = false;
+};
+
+int MenuPx(int value) {
+    UINT dpi = g_hwnd ? GetDpiForWindow(g_hwnd) : GetDpiForSystem();
+    return MulDiv(value, dpi ? dpi : 96, 96);
+}
+
+void PaintMenuRow(const DRAWITEMSTRUCT& draw, const MenuRow& row) {
+    HDC dc = draw.hDC;
+    int saved = SaveDC(dc);
+    RECT bounds = draw.rcItem;
+    bool selected = (draw.itemState & ODS_SELECTED) &&
+                    (row.kind == MenuRowKind::Action || row.kind == MenuRowKind::Device);
+    bool contrast = HighContrast();
+    COLORREF ink = contrast ? GetSysColor(selected ? COLOR_HIGHLIGHTTEXT : COLOR_MENUTEXT) : kInk;
+    COLORREF accent = contrast ? ink : kAccent;
+    FillArea(dc, bounds, contrast ? GetSysColor(COLOR_MENU) : kSurface);
+    if (row.kind == MenuRowKind::Divider) {
+        RECT line{bounds.left + MenuPx(12), bounds.top + MenuPx(3),
+                  bounds.right - MenuPx(12), bounds.top + MenuPx(4)};
+        FillArea(dc, line, contrast ? GetSysColor(COLOR_MENUTEXT) : kLine);
+    } else {
+        if (selected) {
+            RECT selection{bounds.left + MenuPx(4), bounds.top + MenuPx(1),
+                           bounds.right - MenuPx(4), bounds.bottom - MenuPx(1)};
+            FillArea(dc, selection, contrast ? GetSysColor(COLOR_HIGHLIGHT) : kSelection);
+        }
+        HFONT font = CreateFontW(-MenuPx(row.kind == MenuRowKind::Heading ? 11 : 13), 0, 0, 0,
+                                  row.kind == MenuRowKind::Heading ? FW_SEMIBOLD : FW_NORMAL, 0, 0, 0,
+                                  DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        HGDIOBJ original = font ? SelectObject(dc, font) : nullptr;
+        SetBkMode(dc, TRANSPARENT);
+        constexpr UINT flags = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS;
+        RECT label = bounds;
+        label.left += MenuPx(row.kind == MenuRowKind::Device ? 31 : 14);
+        label.right -= MenuPx(14);
+        if (!row.detail.empty()) {
+            SIZE detailSize{};
+            GetTextExtentPoint32W(dc, row.detail.c_str(), static_cast<int>(row.detail.size()), &detailSize);
+            label.right -= std::clamp(static_cast<int>(detailSize.cx) + MenuPx(12), MenuPx(54), MenuPx(133));
+        }
+        SetTextColor(dc, row.kind == MenuRowKind::Heading ? accent : ink);
+        DrawTextW(dc, row.label.c_str(), -1, &label, flags);
+        if (!row.detail.empty()) {
+            RECT detail{label.right + MenuPx(7), bounds.top, bounds.right - MenuPx(14), bounds.bottom};
+            SetTextColor(dc, row.low && !contrast ? RGB(241, 151, 157) : accent);
+            DrawTextW(dc, row.detail.c_str(), -1, &detail, flags | DT_RIGHT);
+        }
+        if (row.checked) {
+            RECT check{bounds.left + MenuPx(12), bounds.top, label.left, bounds.bottom};
+            SetTextColor(dc, accent);
+            DrawTextW(dc, L"\u2713", -1, &check, flags);
+        }
+        if (original) SelectObject(dc, original);
+        if (font) DeleteObject(font);
+    }
+    if (saved) RestoreDC(dc, saved);
+}
+
 void ShowMenu() {
-    HMENU m = CreatePopupMenu();
-    std::vector<std::wstring> keys;  // menu id ID_DEVICE_FIRST + i -> device key
-    if (g_entries.empty()) AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"No devices with battery info found");
-    else AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"Click a device to show or hide it");
+    std::vector<std::wstring> keys;
+    std::vector<MenuRow> rows{{MenuRowKind::Action, ID_REFRESH, L"Refresh now"},
+                              {MenuRowKind::Action, ID_OPTIONS, L"Options\u2026"},
+                              {MenuRowKind::Divider},
+                              {MenuRowKind::Heading, 0, g_entries.empty() ? L"NO BATTERY READINGS" : L"SHOW DEVICES"}};
     for (auto& [k, e] : g_entries) {
-        std::wstring line = e.st.name + L":  " + StatusText(e) + L"   [" + e.st.via + L"]";
-        AppendMenuW(m, MF_STRING | (IsHidden(k) ? 0 : MF_CHECKED), ID_DEVICE_FIRST + (UINT)keys.size(), line.c_str());
+        std::wstring label = e.st.name;
+        for (auto& character : label) if (iswspace(character)) character = L' ';
+        rows.push_back({MenuRowKind::Device, ID_DEVICE_FIRST + (UINT)keys.size(), std::move(label),
+                        StatusText(e), !IsHidden(k),
+                        e.st.percent >= 0 && e.st.percent <= g_lowBattery && !e.st.charging});
         keys.push_back(k);
     }
-    AppendMenuW(m, MF_STRING | (g_hideLastKnown ? MF_CHECKED : 0), ID_HIDE_LAST_KNOWN, L"Hide last known / asleep devices");
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING | (g_wantWidget ? MF_CHECKED : 0), ID_MODE_WIDGET, L"Show on the taskbar (icon + percentage)");
-    AppendMenuW(m, MF_STRING | (!g_wantWidget ? MF_CHECKED : 0), ID_MODE_TRAY, L"Show as tray icons");
-    CheckMenuRadioItem(m, ID_MODE_WIDGET, ID_MODE_TRAY, g_wantWidget ? ID_MODE_WIDGET : ID_MODE_TRAY, MF_BYCOMMAND);
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, ID_REFRESH, L"Refresh now");
-    AppendMenuW(m, MF_STRING | (AutostartEnabled() ? MF_CHECKED : 0), ID_AUTOSTART, L"Start with Windows");
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, ID_EXIT, L"Exit");
+    rows.push_back({MenuRowKind::Divider});
+    rows.push_back({MenuRowKind::Action, ID_EXIT, L"Exit"});
+    HMENU m = CreatePopupMenu();
+    if (!m) return;
+    for (auto& row : rows) {
+        MENUITEMINFOW item{sizeof(item)};
+        item.fMask = MIIM_FTYPE | MIIM_ID | MIIM_STATE | MIIM_DATA | MIIM_STRING;
+        item.fType = MFT_OWNERDRAW;
+        item.wID = row.id;
+        item.fState = row.kind == MenuRowKind::Divider || row.kind == MenuRowKind::Heading ? MFS_DISABLED :
+                      row.checked ? MFS_CHECKED : MFS_ENABLED;
+        item.dwTypeData = row.label.data();
+        item.dwItemData = reinterpret_cast<ULONG_PTR>(&row);
+        InsertMenuItemW(m, GetMenuItemCount(m), TRUE, &item);
+    }
     POINT pt;
     GetCursorPos(&pt);
     SetForegroundWindow(g_hwnd);
-    UINT cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_hwnd, nullptr);
+    UINT cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_hwnd, nullptr);
     PostMessageW(g_hwnd, WM_NULL, 0, 0);
     DestroyMenu(m);
     switch (cmd) {
         case ID_REFRESH: SetEvent(g_refreshEvt); break;
-        case ID_AUTOSTART: SetAutostart(!AutostartEnabled()); break;
-        case ID_HIDE_LAST_KNOWN: SetHideLastKnown(!g_hideLastKnown); break;
-        case ID_MODE_WIDGET: SetMode(true); break;
-        case ID_MODE_TRAY: SetMode(false); break;
+        case ID_OPTIONS: DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_OPTIONS), g_hwnd, OptionsProc, 0); break;
         case ID_EXIT: DestroyWindow(g_hwnd); break;
         default:
             if (cmd >= ID_DEVICE_FIRST && cmd < ID_DEVICE_FIRST + keys.size()) {
@@ -517,7 +880,7 @@ DWORD WINAPI Worker(LPVOID) {
         auto* v = new std::vector<DeviceStatus>(PollAllDevices());
         if (!PostMessageW(g_hwnd, WM_RESULTS, 0, (LPARAM)v)) delete v;
         HANDLE hs[2] = { g_stopEvt, g_refreshEvt };
-        if (WaitForMultipleObjects(2, hs, FALSE, POLL_INTERVAL_MS) == WAIT_OBJECT_0) return 0;
+        if (WaitForMultipleObjects(2, hs, FALSE, g_pollSeconds.load() * 1000) == WAIT_OBJECT_0) return 0;
     }
 }
 
@@ -532,6 +895,31 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     switch (msg) {
+        case WM_MEASUREITEM: {
+            auto* measure = reinterpret_cast<MEASUREITEMSTRUCT*>(lp);
+            if (measure->CtlType != ODT_MENU || !measure->itemData) break;
+            auto& row = *reinterpret_cast<const MenuRow*>(measure->itemData);
+            measure->itemWidth = MenuPx(340);
+            measure->itemHeight = MenuPx(row.kind == MenuRowKind::Divider ? 8 :
+                                        row.kind == MenuRowKind::Heading ? 22 : 29);
+            return TRUE;
+        }
+        case WM_DRAWITEM: {
+            auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lp);
+            if (draw->CtlType != ODT_MENU || !draw->itemData) break;
+            PaintMenuRow(*draw, *reinterpret_cast<const MenuRow*>(draw->itemData));
+            return TRUE;
+        }
+        case WM_MENUCHAR: {
+            int key = towlower(LOWORD(wp));
+            UINT command = key == L'r' ? ID_REFRESH : key == L'o' ? ID_OPTIONS : key == L'x' ? ID_EXIT : 0;
+            if (!command) break;
+            HMENU menu = reinterpret_cast<HMENU>(lp);
+            int count = GetMenuItemCount(menu);
+            for (int i = 0; i < count; ++i)
+                if (GetMenuItemID(menu, i) == command) return MAKELRESULT(i, MNC_EXECUTE);
+            break;
+        }
         case WM_RESULTS: {
             auto* v = reinterpret_cast<std::vector<DeviceStatus>*>(lp);
             OnResults(*v);
@@ -542,11 +930,13 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             switch (LOWORD(lp)) {
                 case WM_CONTEXTMENU:
                 case NIN_SELECT:
-                case NIN_KEYSELECT: ShowMenu(); break;
+                case NIN_KEYSELECT:
+                    if (IsWindowEnabled(h)) ShowMenu();
+                    break;
             }
             return 0;
         case WM_WIDGET_CLICK:
-            ShowMenu();
+            if (IsWindowEnabled(h)) ShowMenu();
             return 0;
         case WM_ENDSESSION:  // sign-out / shutdown / installer restart manager
             if (wp) DestroyWindow(h);
@@ -652,8 +1042,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
 
     g_refreshEvt = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     g_stopEvt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    g_wantWidget = LoadWidgetMode();
-    g_hideLastKnown = LoadHideLastKnown();
+    DWORD legacyMode = LoadSetting(L"TaskbarWidget", true) ? TaskbarWidget : TrayIcons;
+    DWORD mode = LoadSetting(L"DisplayMode", legacyMode);
+    g_displayMode = static_cast<DisplayMode>(mode <= DesktopWidget ? mode : legacyMode);
+    g_hideLastKnown = LoadSetting(L"HideLastKnownDevices", false) != 0;
+    g_pollSeconds.store(LoadPreset(L"PollIntervalSeconds", DEFAULT_POLL_SECONDS, POLL_SECONDS));
+    g_lowBattery = static_cast<int>(LoadPreset(L"LowBatteryThreshold", DEFAULT_LOW_BATTERY, LOW_BATTERY_LEVELS));
+    g_trayAlerts = LoadSetting(L"TrayBatteryAlerts", true) != 0;
     LoadHidden();
     Reconcile();
     UpdatePlaceholder();  // something to click on until the first poll finishes
