@@ -73,6 +73,16 @@ bool ReadLightTaskbar() {
     return false;
 }
 
+void ApplyMenuTheme(bool light) {
+    using SetPreferredAppModeFn = int(WINAPI*)(int);
+    using FlushMenuThemesFn = void(WINAPI*)();
+    static HMODULE ux = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    static auto setMode = ux ? (SetPreferredAppModeFn)GetProcAddress(ux, MAKEINTRESOURCEA(135)) : nullptr;
+    static auto flush = ux ? (FlushMenuThemesFn)GetProcAddress(ux, MAKEINTRESOURCEA(136)) : nullptr;
+    if (setMode) setMode(light ? 3 : 2);
+    if (flush) flush();
+}
+
 std::wstring ExePath() {
     wchar_t p[MAX_PATH];
     GetModuleFileNameW(nullptr, p, MAX_PATH);
@@ -465,6 +475,7 @@ void RedrawAll() {
 }
 
 void ShowMenu() {
+    ApplyMenuTheme(g_lightTaskbar);
     HMENU m = CreatePopupMenu();
     std::vector<std::wstring> keys;  // menu id ID_DEVICE_FIRST + i -> device key
     if (g_entries.empty()) AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"No devices with battery info found");
@@ -564,7 +575,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_SETTINGCHANGE:
             if (lp && !lstrcmpW((LPCWSTR)lp, L"ImmersiveColorSet")) {
                 bool light = ReadLightTaskbar();
-                if (light != g_lightTaskbar) { g_lightTaskbar = light; RedrawAll(); widget::SetLightTheme(light); }
+                if (light != g_lightTaskbar) { g_lightTaskbar = light; ApplyMenuTheme(light); RedrawAll(); widget::SetLightTheme(light); }
             }
             return 0;
         case WM_DESTROY:
@@ -634,6 +645,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
 
     g_lightTaskbar = ReadLightTaskbar();
+    ApplyMenuTheme(g_lightTaskbar);
     g_taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
 
     WNDCLASSEXW wc{ sizeof(wc) };

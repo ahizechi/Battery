@@ -22,6 +22,17 @@ int Dpi() {
 }
 int Px(int v) { return MulDiv(v, Dpi(), 96); }
 
+void ApplyTipTheme() {
+    if (!g_tip) return;
+    using SetWindowThemeFn = HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR);
+    static HMODULE ux = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    static auto setTheme = ux ? (SetWindowThemeFn)GetProcAddress(ux, "SetWindowTheme") : nullptr;
+    if (setTheme) {
+        setTheme(g_tip, g_light ? L"Explorer" : L"DarkMode_Explorer", nullptr);
+        SendMessageW(g_tip, WM_THEMECHANGED, 0, 0);
+    }
+}
+
 wchar_t Glyph(DeviceKind k, bool bluetooth) {
     switch (k) {
         case DeviceKind::Headset:  return 0xE7F6;  // Headphone
@@ -262,6 +273,7 @@ bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme) {
     g_tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, 0, 0, 0, 0,
                             notifyWnd, nullptr, inst, nullptr);
     if (g_tip) {
+        ApplyTipTheme();
         TTTOOLINFOW ti{ sizeof(ti) };
         ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
         ti.hwnd = notifyWnd;
@@ -310,6 +322,7 @@ void SetItems(const std::vector<WidgetItem>& items, const std::wstring& tooltip)
 
 void SetLightTheme(bool light) {
     g_light = light;
+    ApplyTipTheme();
     Paint();
 }
 
