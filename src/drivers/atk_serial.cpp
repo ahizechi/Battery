@@ -30,6 +30,8 @@ std::vector<Port> FindPorts() {
         for (auto& ch : id) ch = towupper(ch);
         USHORT pid = id.find(L"VID_373B&PID_11CB") != std::wstring::npos ? 0x11CB
                    : id.find(L"VID_373B&PID_11CA") != std::wstring::npos ? 0x11CA
+                   : id.find(L"VID_373B&PID_1204") != std::wstring::npos ? 0x1204
+                   : id.find(L"VID_373B&PID_1203") != std::wstring::npos ? 0x1203
                                                                          : 0;
         if (!pid) continue;
         HKEY k = SetupDiOpenDevRegKey(di, &dd, DICS_FLAG_GLOBAL, 0, DIREG_DEV, KEY_READ);
@@ -105,15 +107,16 @@ private:
 void PollAtkSerial(PollContext& ctx) {
     for (const Port& p : FindPorts()) {
         if (ctx.IsClaimed(0x373B, p.pid)) continue;
+        ctx.Claim(0x373B, p.pid);
         Serial port(p.name);
         if (!port.ok()) continue;  // in use (ATK app open) or not a working port
         std::vector<BYTE> data;
         if (!port.Command(0x00, 0x04, data)) continue;
         DeviceStatus s;
         s.key = L"atk-serial:" + Hex4(p.pid);
-        s.name = L"ATK N9 Pro";
+        s.name = (p.pid == 0x1203 || p.pid == 0x1204) ? L"ATK N9 Ultra" : L"ATK N9 Pro";
         s.kind = DeviceKind::Headset;
-        s.via = p.pid == 0x11CA ? L"USB cable" : L"2.4 GHz receiver";
+        s.via = (p.pid == 0x11CA || p.pid == 0x1203) ? L"USB cable" : L"2.4 GHz receiver";
         s.connected = data[1] == 1;
         if (s.connected && port.Command(0x00, 0x03, data)) {
             s.percent = Clamp100(data[1] & 0x7F);
