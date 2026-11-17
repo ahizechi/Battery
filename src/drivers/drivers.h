@@ -62,6 +62,7 @@ void PollSteelSeries(PollContext& ctx);
 void PollCorsair(PollContext& ctx);
 void PollCoolerMaster(PollContext& ctx);
 void PollPlayStation(PollContext& ctx);
+void PollSteamController(PollContext& ctx);
 void PollGameSir(PollContext& ctx);    // Nova Lite / Nova 2 / Nova 2 Lite
 // Fallbacks.
 void PollHeadsetControl(PollContext& ctx);  // only if headsetcontrol.exe is installed
