@@ -8,6 +8,11 @@
 #include <roapi.h>
 #include <winstring.h>
 #include <xinput.h>
+// WinRT boolean is C++ bool. Some MinGW headers inherit RPC's unsigned-char
+// boolean, which collides with IReference<BYTE> in windows.foundation.h.
+#ifdef __MINGW32__
+#define boolean bool
+#endif
 #include <windows.system.power.h>
 // MinGW's windows.devices.power.h names BatteryStatus without its namespace; make it visible there.
 namespace ABI { namespace Windows { namespace Devices { namespace Power {
@@ -15,6 +20,9 @@ using ABI::Windows::System::Power::BatteryStatus;
 } } } }
 #include <windows.devices.power.h>
 #include <windows.gaming.input.h>
+#ifdef __MINGW32__
+#undef boolean
+#endif
 
 namespace {
 

@@ -1,3 +1,4 @@
+#pragma code_page(65001)
 #include <winver.h>
 
 1 ICON "app.ico"
@@ -11,10 +12,10 @@ FILETYPE VFT_APP
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
-    BLOCK "040904B0"
+    BLOCK "080404B0"
     BEGIN
-      VALUE "FileDescription", "Wireless Battery"
-      VALUE "ProductName", "Wireless Battery"
+      VALUE "FileDescription", "无线设备电量监测"
+      VALUE "ProductName", "无线设备电量监测"
       VALUE "FileVersion", "1.0.0"
       VALUE "ProductVersion", "1.0.0"
       VALUE "OriginalFilename", "WirelessBattery.exe"
@@ -22,6 +23,6 @@ BEGIN
   END
   BLOCK "VarFileInfo"
   BEGIN
-    VALUE "Translation", 0x409, 1200
+    VALUE "Translation", 0x804, 1200
   END
 END
