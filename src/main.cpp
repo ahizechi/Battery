@@ -1208,7 +1208,7 @@ void ShowMenu() {
         case ID_STACKED: SetStacked(!g_stacked); break;
         case ID_MODE_WIDGET: SetMode(true); break;
         case ID_MODE_TRAY: SetMode(false); break;
-        case ID_SUPPORT: ShellExecuteW(nullptr, L"open", L"https://github.com/sponsors/krisgfx9", nullptr, nullptr, SW_SHOWNORMAL); break;
+        case ID_SUPPORT: ShellExecuteW(nullptr, L"open", L"https://www.paypal.com/paypalme/krisgfx", nullptr, nullptr, SW_SHOWNORMAL); break;
         case ID_REPORT: report::Show(g_inst, g_hwnd); break;
         case ID_UPDATE: updates::Activate(g_hwnd); break;
         case ID_AUTO_UPDATE: updates::ToggleAutomatic(); break;
