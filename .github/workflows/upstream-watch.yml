@@ -1,8 +1,5 @@
 name: BatteryHub release watch
 
-# Once a day, look at BatteryHub's latest release. When it is newer than the version this fork last merged
-# (.github/upstream-version), open one issue about it. Nothing is ever merged or changed here: bringing an
-# upstream release in stays a manual step (merge into an ai/ branch, let CI pass, then bump the file).
 on:
   schedule:
     - cron: "23 6 * * *"
@@ -12,13 +9,18 @@ permissions:
   contents: read
   issues: write
 
+concurrency:
+  group: upstream-release-watch
+  cancel-in-progress: false
+
 jobs:
   watch:
     runs-on: ubuntu-latest
+    timeout-minutes: 4
     steps:
-      # Actions are pinned to exact commits so a moved tag cannot swap in different code.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           sparse-checkout: .github/upstream-version
           sparse-checkout-cone-mode: false
 
@@ -29,26 +31,37 @@ jobs:
         run: |
           set -euo pipefail
           merged=$(tr -d '[:space:]' < .github/upstream-version)
-          latest=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
+          version_pattern='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [[ ! "$merged" =~ $version_pattern ]]; then
+            echo "::error::.github/upstream-version must contain a stable version tag."
+            exit 1
+          fi
+
+          if result=$(gh api "repos/$UPSTREAM/releases/latest" --jq '.tag_name' 2>&1); then
+            latest=$result
+          elif [[ "$result" == *"(HTTP 404)"* ]]; then
+            echo "::warning::BatteryHub's GitHub releases are unavailable (HTTP 404). The last merged tag is $merged."
+            exit 0
+          else
+            echo "::error::Could not read BatteryHub's latest release. Check the upstream status and GitHub Actions token."
+            exit 1
+          fi
+
+          if [[ ! "$latest" =~ $version_pattern ]]; then
+            echo "::warning::BatteryHub's latest tag is not a stable version tag."
+            exit 0
+          fi
           echo "Last merged: $merged. BatteryHub's latest release: $latest."
-          [ "$latest" = "$merged" ] && exit 0
-          # Only a newer vX.Y.Z counts (sort -V); an older or odd tag marked latest is ignored.
+          [[ "$latest" != "$merged" ]] || exit 0
           newest=$(printf '%s\n%s\n' "${merged#v}" "${latest#v}" | sort -V | tail -n 1)
-          [ "$newest" = "${latest#v}" ] || exit 0
+          [[ "$newest" == "${latest#v}" ]] || exit 0
+
           title="BatteryHub $latest released upstream"
-          if gh issue list -R "$GITHUB_REPOSITORY" --state all --search "in:title \"$title\"" --json title --jq '.[].title' | grep -Fxq "$title"; then
+          existing=$(gh issue list -R "$GITHUB_REPOSITORY" --state all --search "in:title \"$title\"" --json title --jq '.[].title')
+          if grep -Fxq "$title" <<< "$existing"; then
             echo "Already reported."
             exit 0
           fi
-          url=$(gh api "repos/$UPSTREAM/releases/latest" --jq .html_url)
-          ahead=$(gh api "repos/$UPSTREAM/compare/$merged...$latest" --jq .total_commits)
-          {
-            echo "BatteryHub **$latest** is out: $url"
-            echo
-            echo "This fork last merged **$merged**; $ahead BatteryHub commits are new since then."
-            echo
-            echo "Nothing has been merged. To bring it in: merge \`upstream/main\` (or the \`$latest\` tag) into an"
-            echo "\`ai/\` branch, keep this fork's changes where they conflict (see AGENTS.md), let CI pass, merge"
-            echo "into main, set \`.github/upstream-version\` to \`$latest\`, and close this issue."
-          } > body.md
-          gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
+          url="https://github.com/$UPSTREAM/releases/tag/$latest"
+          body=$(printf 'BatteryHub **%s** is out: %s\n\nThis fork last merged **%s**. Review the upstream changes and CONTRIBUTING.md before bringing them in. After merging and verifying the update, set .github/upstream-version to %s and close this issue.' "$latest" "$url" "$merged" "$latest")
+          gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$body"
