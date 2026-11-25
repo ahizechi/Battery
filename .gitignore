@@ -4,5 +4,3 @@ wireless-battery
 *.o
 dist/
 third_party/
-.claude/
-CLAUDE.md
