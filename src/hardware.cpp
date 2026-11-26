@@ -73,7 +73,6 @@ int ReadRam() {
 struct Adapter {
     bool found = false;
     LUID luid{};
-    UINT vendor = 0;
     double dedicatedBytes = 0;
     std::wstring tag;  // how the performance counters name it
 };
@@ -100,7 +99,6 @@ void FindAdapter() {
             if (physical && (!g_adapter.found || (double)d.DedicatedVideoMemory > g_adapter.dedicatedBytes)) {
                 g_adapter.found = true;
                 g_adapter.luid = d.AdapterLuid;
-                g_adapter.vendor = d.VendorId;
                 g_adapter.dedicatedBytes = (double)d.DedicatedVideoMemory;
             }
             a->Release();
@@ -177,6 +175,7 @@ void ApplyQuery(unsigned want) {
     g_pdh.collect(g_query);  // the utilization is a rate: it needs a first sample to compare with
 }
 
+// The counter's instances with valid values; their names point into g_buffer, so use them before the next call.
 std::vector<CounterSample> Instances(PDH_HCOUNTER counter) {
     std::vector<CounterSample> out;
     if (!counter) return out;
@@ -199,8 +198,8 @@ std::vector<CounterSample> Instances(PDH_HCOUNTER counter) {
     return out;
 }
 
-// ---- GPU temperature and power: the graphics driver (D3DKMT); NVIDIA's nvml.dll as a temperature fallback ----
-// nvml.dll is avoided where possible: once initialized it adds about 20 MB and never unloads.
+// ---- GPU temperature and power: the graphics driver (D3DKMT) ----
+// Only what the driver reports: NVIDIA's nvml.dll would add about 20 MB that never unloads (Zek, 26 Nov 2026).
 
 // D3DKMT structures as declared in the Windows SDK's d3dkmthk.h (not every MinGW header set has them).
 struct KmtOpenAdapterFromLuid { LUID AdapterLuid; UINT hAdapter; };
@@ -217,15 +216,6 @@ using KmtCall = LONG(APIENTRY*)(void*);
 KmtCall g_kmtQuery = nullptr, g_kmtClose = nullptr;
 UINT g_kmtAdapter = 0;
 
-using NvmlInitFn = int (*)();
-using NvmlHandleFn = int (*)(unsigned, void**);
-using NvmlTemperatureFn = int (*)(void*, int, unsigned*);
-using NvmlShutdownFn = int (*)();
-HMODULE g_nvml = nullptr;
-void* g_nvmlDevice = nullptr;
-NvmlTemperatureFn g_nvmlTemperature = nullptr;
-NvmlShutdownFn g_nvmlShutdown = nullptr;
-
 bool KmtPerf(KmtAdapterPerfData& p) {
     p = KmtAdapterPerfData{};
     if (!g_kmtAdapter || !g_kmtQuery) return false;
@@ -240,46 +230,10 @@ int KmtTemperature() {
     return hardware_model::PlausibleTemperature(c) ? c : -1;
 }
 
-int NvmlTemperature() {
-    unsigned c = 0;
-    if (!g_nvmlDevice || !g_nvmlTemperature || g_nvmlTemperature(g_nvmlDevice, 0 /* NVML_TEMPERATURE_GPU */, &c) != 0)
-        return -1;
-    return hardware_model::PlausibleTemperature((int)c) ? (int)c : -1;
-}
-
 // The GPU's power draw as a share of its power limit, as the driver reports it (not every driver does).
 int ReadGpuPower() {
     KmtAdapterPerfData p;
     return KmtPerf(p) ? hardware_model::PowerSharePercent(p.Power) : -1;
-}
-
-// `initialized`: nvmlInit_v2 succeeded, so nvmlShutdown is owed.
-void CloseNvml(bool initialized) {
-    if (g_nvml) {
-        if (initialized && g_nvmlShutdown) g_nvmlShutdown();
-        FreeLibrary(g_nvml);
-    }
-    g_nvml = nullptr;
-    g_nvmlDevice = nullptr;
-    g_nvmlTemperature = nullptr;
-    g_nvmlShutdown = nullptr;
-}
-
-// NVIDIA: the driver installs nvml.dll in System32. Only the first NVIDIA GPU is read.
-void OpenNvml() {
-    if (g_nvml) return;
-    g_nvml = SystemDll(L"nvml.dll");
-    NvmlInitFn init = nullptr;
-    NvmlHandleFn handle = nullptr;
-    if (!Resolve(g_nvml, "nvmlInit_v2", init) || !Resolve(g_nvml, "nvmlDeviceGetHandleByIndex_v2", handle) ||
-        !Resolve(g_nvml, "nvmlDeviceGetTemperature", g_nvmlTemperature) ||
-        !Resolve(g_nvml, "nvmlShutdown", g_nvmlShutdown) || init() != 0) {
-        CloseNvml(false);
-        return;
-    }
-    void* device = nullptr;
-    if (handle(0, &device) == 0 && device) g_nvmlDevice = device;
-    else CloseNvml(true);
 }
 
 void CloseKmt() {
@@ -301,10 +255,7 @@ void OpenKmt() {
     }
 }
 
-int ReadGpuTemperature() {
-    int c = KmtTemperature();
-    return c >= 0 ? c : NvmlTemperature();
-}
+int ReadGpuTemperature() { return KmtTemperature(); }
 
 // ---- SSD temperature: the drive that holds Windows ------------------------------------------------
 
@@ -602,13 +553,8 @@ constexpr unsigned kAdapterMetrics = kGpuCounterMetrics | Bit(GpuTemp) | Bit(Gpu
 // Opens the GPU's own sources the mask needs (looking the adapter up first) and closes the others.
 void ApplyGpu(unsigned mask) {
     if (mask & kAdapterMetrics) FindAdapter();
-    bool temperature = (mask & Bit(GpuTemp)) && g_adapter.found;
     if (g_adapter.found && (mask & (Bit(GpuTemp) | Bit(GpuPower)))) OpenKmt();
     else CloseKmt();
-    // nvml.dll only for the temperature, and only when the graphics driver reports none.
-    bool nvml = temperature && g_adapter.vendor == 0x10DE && KmtTemperature() < 0;
-    if (nvml) OpenNvml();
-    else CloseNvml(g_nvmlDevice != nullptr);
     if (!(mask & kAdapterMetrics)) {
         g_adapter = Adapter{};
         g_adapterTried = false;
