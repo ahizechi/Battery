@@ -45,6 +45,22 @@ HWND g_dpiBar;  // while a mirror is painted or placed, Px() uses its taskbar's 
 
 const wchar_t* kClass = L"WirelessBatteryWidget";
 
+// The tray widens or narrows the moment an icon comes or goes (the notification bell, the microphone in use), and
+// the strip must move with it at once, not on the next once-a-second check, or the two overlap meanwhile. Windows
+// reports every window Explorer's taskbar thread moves; only a TrayNotifyWnd counts. The hook is out of context, so
+// the callback runs on our UI thread from its message loop and never makes Explorer wait; it only posts, and the
+// strip moves when that message arrives (one pending at a time, so a burst of moves costs one pass).
+HWINEVENTHOOK g_trayHook;
+bool g_trayMovePending;
+constexpr UINT kTrayMovedMsg = WM_APP + 0x31;
+
+void CALLBACK TrayMoved(HWINEVENTHOOK, DWORD, HWND hwnd, LONG obj, LONG child, DWORD, DWORD) {
+    if (obj != OBJID_WINDOW || child != CHILDID_SELF || !hwnd || g_trayMovePending || !g_wnd) return;
+    wchar_t cls[16];
+    if (!GetClassNameW(hwnd, cls, 16) || lstrcmpW(cls, L"TrayNotifyWnd")) return;
+    g_trayMovePending = PostMessageW(g_wnd, kTrayMovedMsg, 0, 0) != FALSE;
+}
+
 int Dpi() {
     HWND bar = g_dpiBar ? g_dpiBar : g_taskbar;
     UINT d = bar ? GetDpiForWindow(bar) : 0;
@@ -983,6 +999,10 @@ LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
+        case kTrayMovedMsg:
+            g_trayMovePending = false;
+            widget::Reposition();
+            return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
@@ -1036,6 +1056,11 @@ bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme) {
         SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, 600);
     }
     WatchWidgetsButton(g_taskbar);
+    DWORD explorerPid = 0,
+          trayThread = GetWindowThreadProcessId(FindWindowExW(g_taskbar, nullptr, L"TrayNotifyWnd", nullptr), &explorerPid);
+    if (trayThread)
+        g_trayHook = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, nullptr, TrayMoved, explorerPid,
+                                     trayThread, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     g_lastDpi = Dpi();
     Paint();
     g_lastW = -1;
@@ -1052,6 +1077,8 @@ void Destroy() {
         PostMessageW(g_taskbar, WM_SIZE, SIZE_RESTORED, MAKELPARAM(r.right, r.bottom));
     }
     g_rebar = nullptr;
+    if (g_trayHook) { UnhookWinEvent(g_trayHook); g_trayHook = nullptr; }
+    g_trayMovePending = false;  // a posted move dies with the window below
     for (auto& m : g_mirrors) DestroyMirror(m);
     g_mirrors.clear();
     SetMeasureMirrors(false);
