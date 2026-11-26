@@ -319,6 +319,66 @@ HFONT MakeFont(int px, int weight, const wchar_t* face, const wchar_t* fallback,
     return nullptr;
 }
 
+// Geist (Vercel, SIL Open Font License; installer\THIRD_PARTY_NOTICES.txt), the typeface of Zek's Glide: the strip's
+// numbers and tags use its SemiBold. res\Geist-Variable.ttf is unpacked from Glide's Geist-Variable.woff2 and built
+// into the exe; it is loaded, privately to this process, the first time the strip is drawn. GDI lists each named
+// instance of the variable font as a face of its own, so SemiBold is asked for by name at normal weight (asking for
+// "Geist" at semibold weight would embolden the regular instance instead).
+constexpr wchar_t kGeist[] = L"Geist SemiBold";
+bool g_geistTried = false;
+bool g_geistLoaded = false;
+
+bool LoadGeist(const void* data, DWORD size) {
+    g_geistTried = true;
+    DWORD faces = 0;
+    // GDI keeps its own copy; the font stays registered for the life of the process.
+    g_geistLoaded = AddFontMemResourceEx(const_cast<void*>(data), size, nullptr, &faces) != nullptr && faces > 0;
+    return g_geistLoaded;
+}
+
+void EnsureGeist() {
+    if (g_geistTried) return;
+    g_geistTried = true;
+    HRSRC r = FindResourceW(nullptr, L"GEIST", MAKEINTRESOURCEW(10));  // RT_RCDATA, wide in every build
+    HGLOBAL res = r ? LoadResource(nullptr, r) : nullptr;
+    const void* p = res ? LockResource(res) : nullptr;
+    if (p) LoadGeist(p, SizeofResource(nullptr, r));
+}
+
+// Geist SemiBold at px pixels, or null when it is not loaded.
+HFONT GeistFont(int px) {
+    if (!g_geistLoaded) return nullptr;
+    HFONT h = CreateFontW(-px, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                          ANTIALIASED_QUALITY, DEFAULT_PITCH, kGeist);
+    HDC dc = CreateCompatibleDC(nullptr);
+    HGDIOBJ o = SelectObject(dc, h);
+    wchar_t got[LF_FACESIZE] = {};
+    GetTextFaceW(dc, LF_FACESIZE, got);
+    SelectObject(dc, o);
+    DeleteDC(dc);
+    if (_wcsicmp(got, kGeist)) {
+        DeleteObject(h);
+        return nullptr;
+    }
+    return h;
+}
+
+// Whether the font has a glyph for every character of s (GDI does not fall back from a private font).
+bool Covers(HFONT font, const std::wstring& s) {
+    if (!font || s.empty()) return false;
+    HDC dc = CreateCompatibleDC(nullptr);
+    HGDIOBJ o = SelectObject(dc, font);
+    std::vector<WORD> glyphs(s.size());
+    bool all = GetGlyphIndicesW(dc, s.c_str(), (int)s.size(), glyphs.data(), GGI_MARK_NONEXISTING_GLYPHS) != GDI_ERROR;
+    for (WORD g : glyphs) all = all && g != 0xFFFF;
+    SelectObject(dc, o);
+    DeleteDC(dc);
+    return all;
+}
+
+// Geist when it can show s, otherwise the Segoe fallback (translated level words in other scripts).
+HFONT Pick(HFONT geist, HFONT segoe, const std::wstring& s) { return Covers(geist, s) ? geist : segoe; }
+
 // Grayscale coverage mask of a string, cropped to its ink bounds (the strip is alpha-blended, so no ClearType).
 struct Mask {
     int w = 0, h = 0;
@@ -466,16 +526,18 @@ constexpr int kBarHeight = 3;
 //  * stacked (menu option, from PR #525): each device's icon above its number, to save width; used only
 //    when the taskbar is tall enough, otherwise the row
 //  * vertical (left / right taskbar, from PR #321): one block per device, top to bottom
-// All numbers share one baseline and all level bars one width (that of "100%"), so devices line up
-// whatever their levels. `width` and `height` return the strip's size; vertically the width is the bar's.
+// All numbers share one baseline and all level bars one width (that of "100%"), each number centred on its bar,
+// so devices line up whatever their levels. `width` and `height` return the strip's size; vertically the width is the bar's.
 std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
     const Rgb fg = g_light ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 };
     const Rgb red = g_light ? Rgb{ 196, 30, 40 } : Rgb{ 255, 90, 90 };
     const Rgb green = g_light ? Rgb{ 16, 124, 16 } : Rgb{ 108, 203, 95 };  // Windows "success" green: charging / full
     const Rgb orange = g_light ? Rgb{ 188, 75, 0 } : Rgb{ 255, 160, 70 };  // hardware temperature warning
+    EnsureGeist();
     HFONT tagFont = MakeFont(Px(10), FW_SEMIBOLD, L"Segoe UI Variable Text", L"Segoe UI");  // "CPU", "GPU", ...
     HFONT icons = MakeFont(Px(16), FW_NORMAL, L"Segoe Fluent Icons", L"Segoe MDL2 Assets");
     HFONT text = MakeFont(Px(12), FW_SEMIBOLD, L"Segoe UI Variable Text", L"Segoe UI");
+    HFONT geistTag = GeistFont(Px(10)), geistText = GeistFont(Px(12));  // null when Geist is not loaded
     HFONT caption = MakeFont(std::max(8, Px(7)), FW_SEMIBOLD, L"Segoe UI Variable Text", L"Segoe UI");  // never under 8 px
     const int bh = std::max(2, Px(kBarHeight)), barGap = Px(kBarGap);
 
@@ -493,7 +555,8 @@ std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
         // Hardware readings show a short tag ("CPU") instead of a glyph, a little fainter than the number.
         Piece icon = battery ? Piece{ RenderMask(std::wstring(1, Glyph(it.kind, it.bluetooth)), icons, g_light),
                                       branded ? accent : fg, a, Role::Icon }
-                             : Piece{ RenderMask(it.tag, tagFont, g_light), fg, a * 170 / 255, Role::Tag };
+                             : Piece{ RenderMask(it.tag, Pick(geistTag, tagFont, it.tag), g_light), fg, a * 170 / 255,
+                                      Role::Tag };
         if (branded && !it.dim) {
             icon.haloR = Px(3);
             icon.halo = Halo(icon.m, icon.haloR);
@@ -504,7 +567,8 @@ std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
         // Zek's fork: a battery's number stays in the text colour and an Apple-style level bar under it carries
         // the state: green while charging or full on power ("Show charging"), red when low, otherwise the text
         // colour (or the brand colour with Brand colors on). Hardware readings keep orange / red warning text.
-        Piece number{ RenderMask(t, text, g_light), battery ? fg : it.low ? red : it.warm ? orange : fg, a, Role::Number };
+        Piece number{ RenderMask(t, Pick(geistText, text, t), g_light), battery ? fg : it.low ? red : it.warm ? orange : fg,
+                      a, Role::Number };
         if (battery && it.percent >= 0) {
             number.fill = it.full ? 100 : it.percent;  // the level for now; pixels once the bar's width is known
             number.barH = bh;
@@ -519,11 +583,13 @@ std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
     }
     // Every level bar is as wide as "100%", whatever the levels, so bars compare at a glance and the strip keeps
     // its width when a device reaches 100% (a coarse level like "Medium" may widen it).
-    int barWidth = RenderMask(L"100%", text, g_light).w;
+    int barWidth = RenderMask(L"100%", geistText ? geistText : text, g_light).w;
     DeleteObject(icons);
     DeleteObject(tagFont);
     DeleteObject(text);
     DeleteObject(caption);
+    if (geistTag) DeleteObject(geistTag);
+    if (geistText) DeleteObject(geistText);
 
     // Shared measures: the tallest icon, the deepest ascent and descent of the numbers.
     int iconH = 0, ascent = 0, descent = 0;
@@ -544,7 +610,7 @@ std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
     // The number block: ascent, then (when any battery shows a bar) the gap and the bar; descenders hang into the gap.
     const int blockH = ascent + (bars ? barGap + bh : descent);
     auto placeNumber = [&](Piece& n, int x, int top) {
-        n.x = x;
+        n.x = x + std::max(0, n.barW - n.m.w) / 2;  // centred on its bar (Zek, 26 Nov 2026)
         n.y = top + ascent - n.m.base;
         n.barX = x;
         n.barY = top + ascent + barGap;

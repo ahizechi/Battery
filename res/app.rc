@@ -9,6 +9,9 @@
 // The built-in UI languages: lang\*.txt joined by the build (see src/i18n.cpp).
 LANGS RCDATA "languages.txt"
 
+// Geist SemiBold for the taskbar strip's numbers (SIL Open Font License; see src/widget.cpp).
+GEIST RCDATA "Geist-Variable.ttf"
+
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION WB_VERSION_RESOURCE
 PRODUCTVERSION WB_VERSION_RESOURCE
