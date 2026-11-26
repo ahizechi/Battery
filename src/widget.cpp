@@ -339,7 +339,7 @@ bool LoadGeist(const void* data, DWORD size) {
 void EnsureGeist() {
     if (g_geistTried) return;
     g_geistTried = true;
-    HRSRC r = FindResourceW(nullptr, L"GEIST", RT_RCDATA);
+    HRSRC r = FindResourceW(nullptr, L"GEIST", MAKEINTRESOURCEW(10));  // RT_RCDATA, wide in every build
     HGLOBAL res = r ? LoadResource(nullptr, r) : nullptr;
     const void* p = res ? LockResource(res) : nullptr;
     if (p) LoadGeist(p, SizeofResource(nullptr, r));
