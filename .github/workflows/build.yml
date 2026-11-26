@@ -80,4 +80,4 @@ jobs:
           files: dist/*
           append_body: true
           body: |
-            A lean fork of [BatteryHub](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor) by [KrisGFX](https://github.com/krisgfx9) and its contributors. If it is useful to you, please support the original author on [Ko-fi](https://ko-fi.com/krisgfx), [PayPal](https://www.paypal.com/paypalme/krisgfx) or [GitHub Sponsors](https://github.com/sponsors/krisgfx9).
+            A lean fork of BatteryHub by KrisGFX and its contributors. If it is useful to you, please support the original author on [Ko-fi](https://ko-fi.com/krisgfx), [PayPal](https://www.paypal.com/paypalme/krisgfx).

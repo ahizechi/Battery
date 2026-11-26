@@ -48,8 +48,6 @@ bool IsBluetoothHid(const HidColl& c) {
 
 }  // namespace
 
-std::vector<DeviceStatus> PollAllDevices() { return PollDevices(PollOptions{}); }
-
 std::vector<DeviceStatus> PollDevices(const PollOptions& options) {
     PollContext ctx;
     ctx.colls = EnumHid();

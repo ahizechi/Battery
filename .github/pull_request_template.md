@@ -1,6 +1,4 @@
-<!-- This repository is a fork of BatteryHub. New devices, driver fixes and translations belong in
-     BatteryHub (https://github.com/krisgfx9/Wireless-Device-Battery-Monitor) so every user gets them;
-     pull requests here are for what this fork adds. -->
+<!-- Describe the change and how you tested it. Credit the source of any shared BatteryHub device or translation work. -->
 
 ## What this adds
 

@@ -1,10 +1,9 @@
 # Contributing
 
-> **This repository is a fork of [BatteryHub](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor).**
-> Device support, translations and driver fixes belong in BatteryHub, so every user gets them; please
-> send them there. This fork only takes changes to what it adds (hardware readings, the level bar, the
-> "Read batteries from" switches, its updater and releases). The rules below are BatteryHub's and apply
-> here too.
+Battery is a fork of BatteryHub by KrisGFX and its contributors. Use this repository’s
+[issue picker](https://github.com/ahizechi/Battery/issues/new/choose) for device reports and
+problems with this fork. When the original project has a working intake, link shared driver work
+there so it can benefit both projects.
 
 ## Reporting whether a device works
 

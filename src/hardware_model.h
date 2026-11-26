@@ -5,15 +5,15 @@
 #include <climits>
 #include <cwchar>
 #include <cwctype>
-#include <map>
 #include <string>
 #include <vector>
 
 namespace hardware_model {
 
-// One instance of a wildcard performance counter, e.g. "\GPU Engine(*)\Utilization Percentage".
+// One instance of a wildcard performance counter, e.g. "\GPU Engine(*)\Utilization Percentage". The name points
+// into the buffer it was read from (a few hundred instances every refresh, so they are not copied).
 struct CounterSample {
-    std::wstring instance;  // "pid_1234_luid_0x00000000_0x0000D1E4_phys_0_eng_3_engtype_3D"
+    const wchar_t* instance;  // "pid_1234_luid_0x00000000_0x0000D1E4_phys_0_eng_3_engtype_3D"
     double value = 0;
 };
 
@@ -29,25 +29,53 @@ inline std::wstring LuidTag(long high, unsigned long low) {
     return buf;
 }
 
-inline bool MatchesAdapter(const std::wstring& instance, const std::wstring& luidTag) {
-    return !luidTag.empty() && Lower(instance).find(Lower(luidTag)) != std::wstring::npos;
+inline wchar_t AsciiLower(wchar_t c) { return c >= L'A' && c <= L'Z' ? (wchar_t)(c + 32) : c; }
+
+// Where lower-case ASCII `needle` starts in `hay`, ignoring case; null when it is not there.
+inline const wchar_t* FindNoCase(const wchar_t* hay, const wchar_t* needle) {
+    if (!hay || !*needle) return nullptr;
+    for (; *hay; hay++) {
+        size_t i = 0;
+        while (needle[i] && AsciiLower(hay[i]) == needle[i]) i++;
+        if (!needle[i]) return hay;
+    }
+    return nullptr;
 }
 
-// GPU usage like Task Manager: per engine, add up every process's share; the busiest engine is the GPU's
-// usage. -1 when no instance belongs to the adapter.
+inline bool MatchesAdapter(const wchar_t* instance, const std::wstring& luidTag) {
+    return !luidTag.empty() && FindNoCase(instance, luidTag.c_str());
+}
+
+// Reads the decimal number at `p` (at most 4 digits); -1 when there is none.
+inline int ReadIndex(const wchar_t*& p) {
+    int n = -1;
+    for (int digits = 0; digits < 4 && *p >= L'0' && *p <= L'9'; digits++, p++) n = (n < 0 ? 0 : n * 10) + (*p - L'0');
+    return n;
+}
+
+// GPU usage like Task Manager: per engine ("phys_<part>_eng_<n>"), add up every process's share; the busiest
+// engine is the GPU's usage. -1 when no instance belongs to the adapter. Graphics drivers number parts from 0
+// and engines below 64; an instance outside that is skipped.
 inline int GpuUsage(const std::vector<CounterSample>& engines, const std::wstring& luidTag) {
-    std::map<std::wstring, double> perEngine;  // "phys_0_eng_3" -> summed percentage
+    constexpr int kParts = 4, kEngines = 64;
+    double perEngine[kParts * kEngines] = {};
+    bool any = false;
     for (const auto& s : engines) {
         if (!MatchesAdapter(s.instance, luidTag)) continue;
-        std::wstring name = Lower(s.instance);
-        size_t phys = name.find(L"phys_");
-        size_t type = name.find(L"_engtype", phys == std::wstring::npos ? 0 : phys);
-        if (phys == std::wstring::npos || name.find(L"_eng_", phys) == std::wstring::npos) continue;
-        perEngine[name.substr(phys, type == std::wstring::npos ? std::wstring::npos : type - phys)] += s.value;
+        const wchar_t* p = FindNoCase(s.instance, L"phys_");
+        if (!p) continue;
+        p += 5;
+        int part = ReadIndex(p);
+        if (part < 0 || part >= kParts || FindNoCase(p, L"_eng_") != p) continue;
+        p += 5;
+        int eng = ReadIndex(p);
+        if (eng < 0 || eng >= kEngines) continue;
+        perEngine[part * kEngines + eng] += s.value;
+        any = true;
     }
-    if (perEngine.empty()) return -1;
+    if (!any) return -1;
     double busiest = 0;
-    for (const auto& e : perEngine) busiest = std::max(busiest, e.second);
+    for (double e : perEngine) busiest = std::max(busiest, e);
     return (int)std::clamp(busiest + 0.5, 0.0, 100.0);
 }
 

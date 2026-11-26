@@ -1,6 +1,7 @@
 #include "widget.h"
 
 #include "i18n.h"
+#include "widget_rules.h"
 
 #include <commctrl.h>
 #include <uiautomation.h>
@@ -95,7 +96,7 @@ IUIAutomationCondition* StringCondition(IUIAutomation* uia, PROPERTYID prop, con
     return c;
 }
 
-Span MeasureSpan(IUIAutomation* uia, HWND bar) {
+Span MeasureSpan(IUIAutomation* uia, HWND bar, bool widgetsNearTray) {
     Span s;
     s.bar = bar;
     RECT br{};
@@ -120,7 +121,8 @@ Span MeasureSpan(IUIAutomation* uia, HWND bar) {
         if (all) all->Release();
         clock->Release();
     }
-    if (IUIAutomationCondition* wbCond = StringCondition(uia, UIA_AutomationIdPropertyId, L"WidgetsButton")) {
+    IUIAutomationCondition* wbCond = widgetsNearTray ? StringCondition(uia, UIA_AutomationIdPropertyId, L"WidgetsButton") : nullptr;
+    if (wbCond) {
         IUIAutomationElement* wbEl = nullptr;
         RECT r{};
         if (SUCCEEDED(root->FindFirst(TreeScope_Descendants, wbCond, &wbEl)) && wbEl &&
@@ -157,35 +159,69 @@ bool IsXamlTaskbar(HWND bar) {
     return FindWindowExW(bar, nullptr, L"Windows.UI.Composition.DesktopWindowContentBridge", nullptr) != nullptr;
 }
 
+// Reads one of the taskbar's DWORD settings; widget_rules::kUnset when it was never written.
+int TaskbarSetting(HKEY key, const wchar_t* name) {
+    DWORD v = 0, size = sizeof(v);
+    return key && RegQueryValueExW(key, name, nullptr, nullptr, (BYTE*)&v, &size) == ERROR_SUCCESS ? (int)v
+                                                                                                  : widget_rules::kUnset;
+}
+
 DWORD WINAPI WidgetsButtonThread(LPVOID) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    IUIAutomation* uia = nullptr;
+    IUIAutomation* uia = nullptr;  // created only once a search is needed
     IUIAutomationElement* btn = nullptr;
     HWND btnBar = nullptr;
+    int backoffMs = 0;           // wait after the last search that found no button
+    ULONGLONG nextSearch = 0;    // GetTickCount64() at which to search again
+    // The taskbar alignment and Widgets settings: a change wakes the thread and restarts the search at once.
+    HKEY advanced = nullptr;
+    RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced", 0,
+                  KEY_QUERY_VALUE | KEY_NOTIFY, &advanced);
+    HANDLE changed = advanced ? CreateEventW(nullptr, FALSE, FALSE, nullptr) : nullptr;
+    if (changed && RegNotifyChangeKeyValue(advanced, FALSE, REG_NOTIFY_CHANGE_LAST_SET, changed, TRUE) != ERROR_SUCCESS) {
+        CloseHandle(changed);
+        changed = nullptr;
+    }
+    DWORD wait = INFINITE;  // no widget yet (tray-icon mode): sleep until one
     for (;;) {
-        WaitForSingleObject(g_wbWake, btnBar ? 5000 : INFINITE);  // no widget (tray-icon mode): sleep until one
+        HANDLE events[2] = { g_wbWake, changed };
+        DWORD woke = WaitForMultipleObjects(changed ? 2 : 1, events, FALSE, wait);
+        if (woke == WAIT_OBJECT_0 + 1) {
+            RegNotifyChangeKeyValue(advanced, FALSE, REG_NOTIFY_CHANGE_LAST_SET, changed, TRUE);
+            backoffMs = 0;
+            nextSearch = 0;
+        }
         AcquireSRWLockShared(&g_wbLock);
         HWND bar = g_wbTaskbar;
+        bool mirrors = g_wbMirrors;
         ReleaseSRWLockShared(&g_wbLock);
-        if (btn && bar != btnBar) { btn->Release(); btn = nullptr; }
+        if (bar != btnBar) {  // another taskbar (Explorer restarted, monitor change): look again straight away
+            if (btn) { btn->Release(); btn = nullptr; }
+            backoffMs = 0;
+            nextSearch = 0;
+        }
         btnBar = bar;
+        // Only a left-aligned taskbar with Widgets on puts the button beside the tray; a centred one (Windows 11's
+        // default) puts it at the far left, out of the strip's way, so it is never searched for there.
+        const bool nearTray = widget_rules::WidgetsButtonNearTray(TaskbarSetting(advanced, L"TaskbarAl"),
+                                                              TaskbarSetting(advanced, L"TaskbarDa"));
+        if (!nearTray && btn) { btn->Release(); btn = nullptr; }
         RECT r{};
-        if (bar && IsWindow(bar)) {
-            if (!uia)
-                CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER, __uuidof(IUIAutomation), (void**)&uia);
-            if (uia && !btn) {
+        const ULONGLONG now = GetTickCount64();
+        if (bar && IsWindow(bar) && (nearTray || mirrors) && !uia)
+            CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER, __uuidof(IUIAutomation), (void**)&uia);
+        if (bar && IsWindow(bar) && nearTray && uia) {
+            if (!btn && now >= nextSearch) {
                 IUIAutomationElement* root = nullptr;
-                IUIAutomationCondition* cond = nullptr;
-                VARIANT id;
-                VariantInit(&id);
-                id.vt = VT_BSTR;
-                id.bstrVal = SysAllocString(L"WidgetsButton");
-                if (SUCCEEDED(uia->ElementFromHandle(bar, &root)) && root &&
-                    SUCCEEDED(uia->CreatePropertyCondition(UIA_AutomationIdPropertyId, id, &cond)) && cond)
-                    root->FindFirst(TreeScope_Descendants, cond, &btn);
-                VariantClear(&id);
-                if (cond) cond->Release();
+                if (IUIAutomationCondition* cond = StringCondition(uia, UIA_AutomationIdPropertyId, L"WidgetsButton")) {
+                    if (SUCCEEDED(uia->ElementFromHandle(bar, &root)) && root) root->FindFirst(TreeScope_Descendants, cond, &btn);
+                    cond->Release();
+                }
                 if (root) root->Release();
+                if (!btn) {
+                    backoffMs = widget_rules::NextRetryMs(backoffMs);
+                    nextSearch = now + backoffMs;
+                }
             }
             if (btn && FAILED(btn->get_CurrentBoundingRectangle(&r))) {
                 btn->Release();  // stale (Widgets turned off, Explorer restarted): look it up again next time
@@ -193,14 +229,11 @@ DWORD WINAPI WidgetsButtonThread(LPVOID) {
                 r = {};
             }
         }
-        AcquireSRWLockShared(&g_wbLock);
-        bool mirrors = g_wbMirrors;
-        ReleaseSRWLockShared(&g_wbLock);
         std::vector<Span> spans;
         if (bar && mirrors && uia)
             for (HWND t = FindWindowExW(nullptr, nullptr, L"Shell_SecondaryTrayWnd", nullptr); t;
                  t = FindWindowExW(nullptr, t, L"Shell_SecondaryTrayWnd", nullptr))
-                if (IsXamlTaskbar(t)) spans.push_back(MeasureSpan(uia, t));  // Windows 10 bars have real child windows
+                if (IsXamlTaskbar(t)) spans.push_back(MeasureSpan(uia, t, nearTray));  // Windows 10 bars have real child windows
         AcquireSRWLockExclusive(&g_wbLock);
         if (bar && g_wbTaskbar == bar) {  // drop a result for a taskbar we no longer sit on
             g_wbRect = r;
@@ -208,6 +241,14 @@ DWORD WINAPI WidgetsButtonThread(LPVOID) {
         }
         g_spans = std::move(spans);
         ReleaseSRWLockExclusive(&g_wbLock);
+        // Next wake: re-read a found button's rectangle (the weather text changes its width) and the secondary
+        // taskbars every 5 s; with no button found, at the next search (5 s, 10 s ... 10 min after a miss).
+        wait = INFINITE;
+        if (bar && (btn || mirrors)) wait = 5000;
+        if (bar && nearTray && !btn) {
+            const ULONGLONG t = GetTickCount64();
+            wait = std::min<DWORD>(wait, nextSearch > t ? (DWORD)(nextSearch - t) : 0);
+        }
     }
 }
 
@@ -265,7 +306,7 @@ HFONT MakeFont(int px, int weight, const wchar_t* face, const wchar_t* fallback,
     for (const wchar_t* f : { face, fallback }) {
         int h_px = (f == fallback && fallbackPx > 0) ? fallbackPx : px;
         HFONT h = CreateFontW(-h_px, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                              CLEARTYPE_QUALITY, DEFAULT_PITCH, f);
+                              ANTIALIASED_QUALITY, DEFAULT_PITCH, f);
         HDC dc = CreateCompatibleDC(nullptr);
         HGDIOBJ o = SelectObject(dc, h);
         wchar_t got[LF_FACESIZE] = {};
@@ -278,9 +319,10 @@ HFONT MakeFont(int px, int weight, const wchar_t* face, const wchar_t* fallback,
     return nullptr;
 }
 
-// Grayscale coverage mask of a string, cropped to its ink bounds.
+// Grayscale coverage mask of a string, cropped to its ink bounds (the strip is alpha-blended, so no ClearType).
 struct Mask {
     int w = 0, h = 0;
+    int base = 0;  // text: rows from the top to the baseline
     std::vector<BYTE> a;
 };
 
@@ -290,6 +332,8 @@ Mask RenderMask(const std::wstring& s, HFONT font, bool darkOnLight) {
     HGDIOBJ of = SelectObject(dc, font);
     SIZE sz;
     GetTextExtentPoint32W(dc, s.c_str(), (int)s.size(), &sz);
+    TEXTMETRICW tm{};
+    GetTextMetricsW(dc, &tm);
     int W = sz.cx + 8, H = sz.cy + 8;
     BITMAPINFO bi{};
     bi.bmiHeader = { sizeof(BITMAPINFOHEADER), W, -H, 1, 32, BI_RGB };
@@ -313,6 +357,7 @@ Mask RenderMask(const std::wstring& s, HFONT font, bool darkOnLight) {
     if (x1 >= 0) {
         m.w = x1 - x0 + 1;
         m.h = y1 - y0 + 1;
+        m.base = 4 + tm.tmAscent - y0;
         m.a.resize((size_t)m.w * m.h);
         for (int y = 0; y < m.h; y++)
             for (int x = 0; x < m.w; x++) m.a[y * m.w + x] = cover(p[(y0 + y) * W + x0 + x]);
@@ -376,162 +421,231 @@ Mask Halo(const Mask& m, int r) {
     return g;
 }
 
-// A horizontal bar with round ends (radius h / 2), anti-aliased: the Apple-style battery level bar.
-void Capsule(Canvas& cv, int x, int y, int w, int h, Rgb c, int alpha) {
+// A rounded rectangle, anti-aliased: corner radius r (h / 2 gives a capsule, the level bar's shape).
+void RoundRect(Canvas& cv, int x, int y, int w, int h, double r, Rgb c, int alpha) {
     if (w <= 0 || h <= 0 || alpha <= 0) return;
-    const double r = h / 2.0, cy = y + r;
-    const double left = x + r, right = std::max(left, x + w - r);  // centres of the two end caps
+    r = std::min({ r, w / 2.0, h / 2.0 });
+    const double l = x + r, t = y + r, rr = x + w - r, b = y + h - r;  // the corners' centres
     for (int yy = y; yy < y + h; yy++)
         for (int xx = x; xx < x + w; xx++) {
             double px = xx + 0.5, py = yy + 0.5;
-            double dx = px < left ? left - px : (px > right ? px - right : 0.0), dy = py - cy;
-            double cover = std::clamp(r - std::sqrt(dx * dx + dy * dy) + 0.5, 0.0, 1.0);
+            double dx = px < l ? l - px : px > rr ? px - rr : 0.0;
+            double dy = py < t ? t - py : py > b ? py - b : 0.0;
+            double cover = dx == 0 || dy == 0 ? std::clamp(r - std::max(dx, dy) + 0.5, 0.0, 1.0)
+                                               : std::clamp(r - std::sqrt(dx * dx + dy * dy) + 0.5, 0.0, 1.0);
             if (cover > 0) cv.Blend(xx, yy, c, (int)(alpha * cover + 0.5));
         }
 }
 
-// One drawn piece of the strip. Normal pieces follow each other from left to right. A piece with an
-// `anchor` (index of an earlier piece) is a caption: drawn over that piece, `bx`/`by` from its top-left
-// corner, and taking no room of its own. Branded devices add a glow behind the glyph and a level bar.
+// One drawn piece of the strip, at its final place. A battery's number carries its level bar: a track of
+// barW x barH at (barX, barY) and the first `fill` pixels of it in barColor. Branded devices add a glow behind
+// the glyph; a caption is a tiny label on the corner of its icon, outlined in the taskbar's colour.
+enum class Role { Icon, Number, Tag, Caption };
 struct Piece {
     Mask m;
-    Rgb color;
-    int alpha;
-    int gapAfter;
-    int anchor = -1;
-    int bx = 0, by = 0;
-    int barPct = -1;  // >= 0: thin level bar under the text (branded devices)
+    Rgb color{};
+    int alpha = 255;
+    Role role = Role::Icon;
+    int x = 0, y = 0;
+    int barX = 0, barY = 0, barW = 0, barH = 0, fill = 0;
     Rgb barColor{};
-    Mask halo;        // glow drawn behind the glyph (branded devices)
+    Mask halo;
     int haloR = 0, haloAlpha = 0;
-    int px = INT_MIN, py = 0;  // fixed top-left position (stacked and vertical layouts); INT_MIN = flow left to right
+    int anchor = -1;  // a caption's icon (index into the pieces)
 };
 
+// The strip's measurements at 100% scaling, scaled with Px().
+constexpr int kPad = 8;          // left and right of the strip (the hover highlight's edge)
+constexpr int kIconGap = 6;      // icon or tag to its number
+constexpr int kDeviceGap = 16;   // one device to the next
+constexpr int kBarGap = 3;       // number to its level bar
+constexpr int kBarHeight = 3;
+
 // Three arrangements of the same pieces:
-//  * normal: "[icon] 30%  [icon] 93%" in one row (unchanged default)
-//  * stacked (menu option, from PR #525): each device's icon above its percentage, to save width;
-//    used only when the taskbar is tall enough, otherwise the normal row
-//  * vertical (left / right taskbar, from PR #321): one device per row block, stacked top to bottom
-// `width` and `height` return the strip's size; in the vertical layout the width is the bar's.
+//  * row (default): "[icon] 84%  [icon] 39%", every level bar under its number
+//  * stacked (menu option, from PR #525): each device's icon above its number, to save width; used only
+//    when the taskbar is tall enough, otherwise the row
+//  * vertical (left / right taskbar, from PR #321): one block per device, top to bottom
+// All numbers share one baseline and all level bars one width (that of "100%"), so devices line up
+// whatever their levels. `width` and `height` return the strip's size; vertically the width is the bar's.
 std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
-    Rgb fg = g_light ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 };
-    Rgb red = g_light ? Rgb{ 196, 30, 40 } : Rgb{ 255, 90, 90 };
-    Rgb green = g_light ? Rgb{ 16, 124, 16 } : Rgb{ 108, 203, 95 };  // Windows "success" green: charging / full
-    Rgb orange = g_light ? Rgb{ 188, 75, 0 } : Rgb{ 255, 160, 70 };  // hardware temperature warning
+    const Rgb fg = g_light ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 };
+    const Rgb red = g_light ? Rgb{ 196, 30, 40 } : Rgb{ 255, 90, 90 };
+    const Rgb green = g_light ? Rgb{ 16, 124, 16 } : Rgb{ 108, 203, 95 };  // Windows "success" green: charging / full
+    const Rgb orange = g_light ? Rgb{ 188, 75, 0 } : Rgb{ 255, 160, 70 };  // hardware temperature warning
     HFONT tagFont = MakeFont(Px(10), FW_SEMIBOLD, L"Segoe UI Variable Text", L"Segoe UI");  // "CPU", "GPU", ...
     HFONT icons = MakeFont(Px(16), FW_NORMAL, L"Segoe Fluent Icons", L"Segoe MDL2 Assets");
-    HFONT text = MakeFont(Px(13), FW_NORMAL, L"Segoe UI Variable Text", L"Segoe UI", Px(12));
+    HFONT text = MakeFont(Px(12), FW_SEMIBOLD, L"Segoe UI Variable Text", L"Segoe UI");
     HFONT caption = MakeFont(std::max(8, Px(7)), FW_SEMIBOLD, L"Segoe UI Variable Text", L"Segoe UI");  // never under 8 px
+    const int bh = std::max(2, Px(kBarHeight)), barGap = Px(kBarGap);
 
     std::vector<Piece> out;
-    struct Slot { int icon, label, bolt; };  // indices of one device's pieces
+    struct Slot { int icon, number; };  // indices of one device's pieces
     std::vector<Slot> slots;
-    if (g_items.empty()) out.push_back({ RenderMask(std::wstring(1, kBatteryUnknown), icons, g_light), fg, 110, 0 });
-    for (size_t i = 0; i < g_items.size(); i++) {
-        const auto& it = g_items[i];
-        int a = it.dim ? 120 : 255;
-        bool battery = it.tag.empty();
-        // Zek's fork: a battery's number stays in the text colour; its level bar carries the state.
-        // Hardware readings keep their orange / red temperature text.
-        Rgb tc = battery ? fg : it.low ? red : it.warm ? orange : fg;
-        const bool mark = false;  // no symbol beside the number any more (the bar shows charging)
-        size_t glyph = out.size();
-        slots.push_back({ (int)glyph, (int)glyph + 1, mark ? (int)glyph + 2 : -1 });
-        bool branded = it.accent != Accent::None;
-        BrandColor bc = AccentColor(it.accent, g_light);
-        Rgb accent{ bc.r, bc.g, bc.b };
+    if (g_items.empty()) out.push_back({ RenderMask(std::wstring(1, kBatteryUnknown), icons, g_light), fg, 110 });
+    for (const auto& it : g_items) {
+        const int a = it.dim ? 120 : 255;
+        const bool battery = it.tag.empty();
+        const bool branded = it.accent != Accent::None;
+        const BrandColor bc = AccentColor(it.accent, g_light);
+        const Rgb accent{ bc.r, bc.g, bc.b };
+        slots.push_back({ (int)out.size(), (int)out.size() + 1 });
         // Hardware readings show a short tag ("CPU") instead of a glyph, a little fainter than the number.
-        Piece icon = it.tag.empty()
-                         ? Piece{ RenderMask(std::wstring(1, Glyph(it.kind, it.bluetooth)), icons, g_light), branded ? accent : fg, a, Px(5) }
-                         : Piece{ RenderMask(it.tag, tagFont, g_light), fg, a * 170 / 255, Px(4) };
+        Piece icon = battery ? Piece{ RenderMask(std::wstring(1, Glyph(it.kind, it.bluetooth)), icons, g_light),
+                                      branded ? accent : fg, a, Role::Icon }
+                             : Piece{ RenderMask(it.tag, tagFont, g_light), fg, a * 170 / 255, Role::Tag };
         if (branded && !it.dim) {
             icon.haloR = Px(3);
             icon.halo = Halo(icon.m, icon.haloR);
             icon.haloAlpha = g_light ? 60 : 140;
         }
         out.push_back(std::move(icon));
-        std::wstring t = !it.text.empty() ? it.text : it.percent >= 0 ? std::to_wstring(it.percent) + L"%" : L"?";
-        Piece label{ RenderMask(t, text, g_light), tc, a, 0 };
-        // Zek's fork: an Apple-style level bar under every battery's number (variant A of the mockup):
-        // text colour normally (or the brand colour with Brand colors on), green while charging or full on
-        // power ("Show charging"), red when low.
+        const std::wstring t = !it.text.empty() ? it.text : it.percent >= 0 ? std::to_wstring(it.percent) + L"%" : L"?";
+        // Zek's fork: a battery's number stays in the text colour and an Apple-style level bar under it carries
+        // the state: green while charging or full on power ("Show charging"), red when low, otherwise the text
+        // colour (or the brand colour with Brand colors on). Hardware readings keep orange / red warning text.
+        Piece number{ RenderMask(t, text, g_light), battery ? fg : it.low ? red : it.warm ? orange : fg, a, Role::Number };
         if (battery && it.percent >= 0) {
-            label.barPct = it.full ? 100 : it.percent;
-            label.barColor = it.low ? red
-                           : (g_showCharging && (it.charging || it.full)) ? green
-                           : branded ? accent : fg;
+            number.fill = it.full ? 100 : it.percent;  // the level for now; pixels once the bar's width is known
+            number.barH = bh;
+            number.barColor = it.low ? red : (g_showCharging && (it.charging || it.full)) ? green : branded ? accent : fg;
         }
-        out.push_back(std::move(label));
-        out.back().gapAfter = i + 1 < g_items.size() ? Px(14) : 0;
-        if (!it.label.empty()) {  // tiny caption in the bottom-right corner of the icon
-            Piece c{ RenderMask(it.label, caption, g_light), fg, a, 0 };
-            c.anchor = (int)glyph;
-            c.bx = out[glyph].m.w - c.m.w + Px(3);
-            c.by = out[glyph].m.h - c.m.h + Px(3);
-            out.push_back(c);
+        const size_t glyph = out.size() - 1;
+        out.push_back(std::move(number));
+        if (!it.label.empty()) {
+            out.push_back({ RenderMask(it.label, caption, g_light), fg, a, Role::Caption });
+            out.back().anchor = (int)glyph;
         }
     }
+    // Every level bar is as wide as "100%", whatever the levels, so bars compare at a glance and the strip keeps
+    // its width when a device reaches 100% (a coarse level like "Medium" may widen it).
+    int barWidth = RenderMask(L"100%", text, g_light).w;
     DeleteObject(icons);
     DeleteObject(tagFont);
     DeleteObject(text);
     DeleteObject(caption);
 
-    height = barH;
-    const int rowGap = Px(2), barRoom = Px(5);  // barRoom: space for a brand level bar under the text
-    int iconH = 0, textH = 0;
+    // Shared measures: the tallest icon, the deepest ascent and descent of the numbers.
+    int iconH = 0, ascent = 0, descent = 0;
+    bool bars = false;
     for (const Slot& s : slots) {
-        iconH = std::max(iconH, out[s.icon].m.h);
-        textH = std::max(textH, out[s.label].m.h);
+        const Piece& n = out[s.number];
+        if (out[s.icon].role == Role::Icon) iconH = std::max(iconH, out[s.icon].m.h);
+        ascent = std::max(ascent, n.m.base);
+        descent = std::max(descent, n.m.h - n.m.base);
+        if (n.barH) { bars = true; barWidth = std::max(barWidth, n.m.w); }
     }
-    bool stacked = !g_vertical && g_stacked && !slots.empty() && barH >= iconH + rowGap + textH + barRoom + Px(6);
+    for (const Slot& s : slots) {
+        Piece& n = out[s.number];
+        if (!n.barH) continue;
+        n.barW = barWidth;
+        n.fill = n.fill <= 0 ? 0 : std::min(barWidth, std::max(bh, (n.fill * barWidth + 50) / 100));  // never thinner than round
+    }
+    // The number block: ascent, then (when any battery shows a bar) the gap and the bar; descenders hang into the gap.
+    const int blockH = ascent + (bars ? barGap + bh : descent);
+    auto placeNumber = [&](Piece& n, int x, int top) {
+        n.x = x;
+        n.y = top + ascent - n.m.base;
+        n.barX = x;
+        n.barY = top + ascent + barGap;
+    };
+    auto placeCaptions = [&]() {
+        for (Piece& c : out)
+            if (c.role == Role::Caption) {
+                const Piece& icon = out[c.anchor];
+                c.x = icon.x + icon.m.w - c.m.w + Px(3);
+                c.y = icon.y + icon.m.h - c.m.h + Px(3);
+            }
+    };
+
+    height = barH;
+    const int rowGap = Px(4);
     if (g_vertical && !slots.empty()) {
-        // One block per device, centred in the bar's width: icon, then the percentage (and bolt) under it.
+        // One block per device, centred in the bar's width: icon, then the number and its bar.
         width = barW;
         int y = Px(6);
         for (const Slot& s : slots) {
             Piece& ic = out[s.icon];
-            Piece& lb = out[s.label];
-            int boltW = s.bolt >= 0 ? Px(2) + out[s.bolt].m.w : 0;
-            ic.px = (barW - ic.m.w) / 2;
-            ic.py = y;
+            Piece& n = out[s.number];
+            ic.x = (barW - ic.m.w) / 2;
+            ic.y = y;
             y += ic.m.h + rowGap;
-            lb.px = (barW - lb.m.w - boltW) / 2;
-            lb.py = y;
-            if (s.bolt >= 0) {
-                out[s.bolt].px = lb.px + lb.m.w + Px(2);
-                out[s.bolt].py = y + (lb.m.h - out[s.bolt].m.h) / 2;
-            }
-            y += lb.m.h + (lb.barPct >= 0 ? barRoom : 0) + Px(8);
+            const int w = std::max(n.m.w, n.barW);
+            placeNumber(n, (barW - w) / 2, y);
+            n.x = (barW - n.m.w) / 2;
+            y += blockH + Px(10);
         }
         height = y;
+        placeCaptions();
         return out;
     }
-    if (stacked) {
-        // Icon on top (bolt to its right), percentage centred under it; the pair centred in the bar's height.
-        int top = (barH - (iconH + rowGap + textH + barRoom)) / 2;
-        int x = Px(8);
+    if (!g_vertical && g_stacked && !slots.empty() && barH >= iconH + rowGap + blockH + Px(6)) {
+        // Icon on top, the number and its bar centred under it; the pair centred in the bar's height.
+        const int top = (barH - (iconH + rowGap + blockH)) / 2;
+        int x = Px(kPad);
         for (const Slot& s : slots) {
             Piece& ic = out[s.icon];
-            Piece& lb = out[s.label];
-            int boltW = s.bolt >= 0 ? Px(2) + out[s.bolt].m.w : 0;
-            int slotW = std::max(ic.m.w + boltW, lb.m.w);
-            ic.px = x + (slotW - ic.m.w - boltW) / 2;
-            ic.py = top + (iconH - ic.m.h) / 2;
-            if (s.bolt >= 0) {
-                out[s.bolt].px = ic.px + ic.m.w + Px(2);
-                out[s.bolt].py = top + (iconH - out[s.bolt].m.h) / 2;
-            }
-            lb.px = x + (slotW - lb.m.w) / 2;
-            lb.py = top + iconH + rowGap;
-            x += slotW + Px(10);
+            Piece& n = out[s.number];
+            const int slotW = std::max({ ic.m.w, n.m.w, n.barW });
+            ic.x = x + (slotW - ic.m.w) / 2;
+            ic.y = top + (iconH - ic.m.h) / 2;
+            placeNumber(n, x + (slotW - std::max(n.m.w, n.barW)) / 2, top + iconH + rowGap);
+            n.x = x + (slotW - n.m.w) / 2;
+            x += slotW + Px(12);
         }
-        width = x - Px(10) + Px(8);
+        width = x - Px(12) + Px(kPad);
+        placeCaptions();
         return out;
     }
-    width = Px(8) * 2;
-    for (auto& p : out)
-        if (p.anchor < 0) width += p.m.w + p.gapAfter;
+    // Row: every icon and every number centred on the bar's midline, the level bars hanging below the numbers.
+    const int top = (barH - ascent) / 2;
+    int x = Px(kPad);
+    for (size_t i = 0; i < slots.size(); i++) {
+        Piece& ic = out[slots[i].icon];
+        Piece& n = out[slots[i].number];
+        ic.x = x;
+        // A tag is text: it sits on the numbers' baseline. A glyph is centred.
+        ic.y = ic.role == Role::Tag ? top + ascent - ic.m.base : (barH - ic.m.h) / 2;
+        x += ic.m.w + Px(ic.role == Role::Tag ? 4 : kIconGap);
+        placeNumber(n, x, top);
+        x += std::max(n.m.w, n.barW) + (i + 1 < slots.size() ? Px(kDeviceGap) : 0);
+    }
+    if (slots.empty()) {  // the "no devices" battery glyph
+        out[0].x = x;
+        out[0].y = (barH - out[0].m.h) / 2;
+        x += out[0].m.w;
+    }
+    width = x + Px(kPad);
+    placeCaptions();
     return out;
+}
+
+// Paints the pieces into a premultiplied BGRA canvas of the strip's size.
+Canvas Compose(const std::vector<Piece>& pieces, int W, int H, bool hover) {
+    Canvas cv(W, H);
+    // Nearly transparent background so the whole strip receives mouse input.
+    for (auto& p : cv.px) p = 0x01000000;
+    // Optional plate in the taskbar's own colours: keeps the text readable when a taskbar theme
+    // (e.g. Windhawk's Taskbar Styler) makes the bar transparent over the wallpaper.
+    const Rgb barColor = g_light ? Rgb{ 243, 243, 243 } : Rgb{ 32, 32, 32 };
+    const Rgb fg = g_light ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 };
+    const int inset = std::min(Px(4), H / 4);
+    if (g_background) RoundRect(cv, 0, inset, W, H - 2 * inset, Px(6), barColor, 240);
+    // Hover highlight like the notification area's buttons.
+    if (hover) RoundRect(cv, 0, inset, W, H - 2 * inset, Px(4), fg, g_light ? 20 : 26);
+    for (const Piece& p : pieces) {
+        if (p.haloR) cv.Draw(p.halo, p.x - p.haloR, p.y - p.haloR, p.color, p.haloAlpha * p.alpha / 255);
+        if (p.barW) {  // a faint track, the level on top
+            RoundRect(cv, p.barX, p.barY, p.barW, p.barH, p.barH / 2.0, fg, (g_light ? 46 : 64) * p.alpha / 255);
+            RoundRect(cv, p.barX, p.barY, p.fill, p.barH, p.barH / 2.0, p.barColor, p.alpha);
+        }
+        if (p.role == Role::Caption)  // one-pixel outline so it reads over the icon's lines
+            for (int oy = -1; oy <= 1; oy++)
+                for (int ox = -1; ox <= 1; ox++)
+                    if (ox || oy) cv.Draw(p.m, p.x + ox, p.y + oy, barColor, 255);
+        cv.Draw(p.m, p.x, p.y, p.color, p.alpha);
+    }
+    return cv;
 }
 
 // Draws the strip for one window: the primary one or a mirror on a secondary taskbar.
@@ -541,55 +655,7 @@ void PaintStrip(HWND wnd, HWND taskbar, bool hover, SIZE& size) {
     int W = 0, H = 0;
     auto pieces = Layout(bar.right - bar.left, bar.bottom - bar.top, W, H);
     if (W <= 0 || H <= 0) return;
-    Canvas cv(W, H);
-
-    // Nearly transparent background so the whole strip receives mouse input,
-    // plus a rounded hover highlight like the system tray icons have.
-    for (auto& p : cv.px) p = 0x01000000;
-    auto roundRect = [&](int inset, int r, Rgb c, int a) {
-        for (int y = inset; y < H - inset; y++)
-            for (int x = 0; x < W; x++) {
-                int dx = x < r ? r - x : (x >= W - r ? x - (W - r - 1) : 0);
-                int dy = y < inset + r ? inset + r - y : (y >= H - inset - r ? y - (H - inset - r - 1) : 0);
-                if (dx * dx + dy * dy <= r * r) cv.Blend(x, y, c, a);
-            }
-    };
-    // Optional plate in the taskbar's own colours: keeps the text readable when a taskbar theme
-    // (e.g. Windhawk's Taskbar Styler) makes the bar transparent over the wallpaper.
-    Rgb barColor = g_light ? Rgb{ 243, 243, 243 } : Rgb{ 32, 32, 32 };
-    if (g_background) roundRect(Px(4), Px(6), barColor, 240);
-    if (hover) roundRect(Px(4), Px(4), g_light ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 }, g_light ? 20 : 26);
-
-    int x = Px(8);
-    Rgb track = g_light ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 };
-    std::vector<int> xs(pieces.size()), ys(pieces.size());
-    for (size_t i = 0; i < pieces.size(); i++) {
-        const Piece& p = pieces[i];
-        if (p.anchor < 0) {
-            bool fixed = p.px != INT_MIN;  // stacked / vertical layout: Layout() placed it
-            xs[i] = fixed ? p.px : x;
-            ys[i] = fixed ? p.py : (H - p.m.h) / 2;
-            if (p.haloR) cv.Draw(p.halo, xs[i] - p.haloR, ys[i] - p.haloR, p.color, p.haloAlpha * p.alpha / 255);
-            if (p.barPct >= 0) {
-                // Apple-style level bar under the number, as wide as the number, with round ends: a faint
-                // track and the filled part on top. In the row layout text and bar are centred together.
-                int bh = std::max(2, Px(3)), gap = Px(2);
-                if (!fixed) ys[i] = (H - (p.m.h + gap + bh)) / 2;
-                int by = ys[i] + p.m.h + gap;
-                int fill = p.barPct <= 0 ? 0 : std::max(bh, (p.barPct * p.m.w + 50) / 100);  // never thinner than round
-                Capsule(cv, xs[i], by, p.m.w, bh, track, (g_light ? 40 : 56) * p.alpha / 255);
-                if (fill) Capsule(cv, xs[i], by, std::min(fill, p.m.w), bh, p.barColor, p.alpha);
-            }
-            if (!fixed) x += p.m.w + p.gapAfter;
-        } else {  // caption: one-pixel outline in the taskbar's colour so it reads over the icon's lines
-            xs[i] = xs[p.anchor] + p.bx;
-            ys[i] = ys[p.anchor] + p.by;
-            for (int oy = -1; oy <= 1; oy++)
-                for (int ox = -1; ox <= 1; ox++)
-                    if (ox || oy) cv.Draw(p.m, xs[i] + ox, ys[i] + oy, barColor, 255);
-        }
-        cv.Draw(p.m, xs[i], ys[i], p.color, p.alpha);
-    }
+    Canvas cv = Compose(pieces, W, H, hover);
 
     HDC screen = GetDC(nullptr);
     HDC mem = CreateCompatibleDC(screen);

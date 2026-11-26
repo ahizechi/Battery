@@ -1,15 +1,12 @@
 # Credits
 
-Battery is a fork of [BatteryHub](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor). These are the people and projects whose work it is built on.
+Battery is a fork of BatteryHub. These are the people and projects whose work it is built on.
 
 ## Credits
 
-- **[BatteryHub](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor)** by
-  **[KrisGFX](https://github.com/krisgfx9)** and its
-  [contributors](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor/graphs/contributors):
-  the app this fork is built on, nearly all of its code and documentation, and the device research
-  credited below. Support it on [Ko-fi](https://ko-fi.com/krisgfx),
-  [PayPal](https://www.paypal.com/paypalme/krisgfx) or [GitHub Sponsors](https://github.com/sponsors/krisgfx9).
+- **BatteryHub** by **KrisGFX** and its contributors: the app this fork is built on, nearly all of its
+  code and documentation, and the device research credited below. Its GitHub repository is no longer
+  online. Support KrisGFX on [Ko-fi](https://ko-fi.com/krisgfx) or [PayPal](https://www.paypal.com/paypalme/krisgfx).
 - **[TraySense](https://github.com/DMTWEAKS/TraySense)** by DMTWEAKS: the idea of showing hardware
   usage and temperatures on the taskbar. This fork's hardware readings are written separately (TraySense
   is AGPL-3.0); none of its code is used.
@@ -35,7 +32,6 @@ The protocols come from these projects' research:
 - Linux `hid-kysona` (Lode Willems): Kysona, Pulsar and ATK
 - ATK's web configurator ([hub.atk.pro](https://hub.atk.pro)): ATK mice and the N9 Pro / N9 Ultra headsets
 - [PulsarBattery](https://github.com/darthsoup/PulsarBattery): Pulsar X2 V3 / X2 V3 eS
-- ATK's web configurator ([hub.atk.pro](https://hub.atk.pro)): ATK mice and the N9 Pro headset
 - [HaloBattery](https://github.com/HeyOkay/HaloBattery) PR #350 and [mouse-battery](https://github.com/qwr79/mouse-battery): ATK / VXE NK NANO dongle
 - [HaloBattery](https://github.com/HeyOkay/HaloBattery) (MIT): Audeze Maxwell, NZXT Lift Elite, Poly BT600, Razer Barracuda Pro, SteelSeries Arctis Nova Elite, ATK V75X and Endgame Gear XM2we, ported from its providers (each driver names its source)
 - [HaloBattery](https://github.com/HeyOkay/HaloBattery) `providers/turtlebeach.py` and [halobattery-stealth700](https://github.com/PaulRichez/halobattery-stealth700) (PaulRichez, MIT): Turtle Beach Stealth 700 Gen 3; [Neap](https://github.com/lykosapps/Neap) (findings only): the Turtle Beach Swarm II device family

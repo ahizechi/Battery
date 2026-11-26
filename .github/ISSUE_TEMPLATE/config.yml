@@ -1,8 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: A device is not supported or reads wrong
-    url: https://github.com/krisgfx9/Wireless-Device-Battery-Monitor/issues/new
-    about: Device support is added in BatteryHub, so every user gets it. Please report it there with the output of --dump.
   - name: Security problem
     url: https://github.com/ahizechi/Battery/security/advisories/new
-    about: Report it privately, not in a public issue.
+    about: Report it privately through GitHub's vulnerability reporting form.

@@ -32,6 +32,14 @@ int main() {
         { L"pid_1_luid_0x00000000_0x0000D1E4_phys_1_eng_0_engtype_3D", 35 },
     };
     assert(GpuUsage(linked, tag) == 35);
+    // Engine numbers past 9 are their own engines (eng_1 is not eng_12); a name without an engine is skipped.
+    const std::vector<CounterSample> many = {
+        { L"pid_1_luid_0x00000000_0x0000D1E4_phys_0_eng_1_engtype_Copy", 30 },
+        { L"pid_2_luid_0x00000000_0x0000D1E4_phys_0_eng_12_engtype_Compute", 45 },
+        { L"pid_3_luid_0x00000000_0x0000D1E4_phys_0_eng_12_engtype_Compute", 5 },
+        { L"pid_4_luid_0x00000000_0x0000D1E4_phys_0", 90 },
+    };
+    assert(GpuUsage(many, tag) == 50);
 
     // Video memory: bytes for the adapter, as a share of its dedicated memory.
     std::vector<CounterSample> memory = {
