@@ -5,8 +5,7 @@ Everything beyond the [README](../README.md): display options, alerts, installin
 ## Display
 
 **On the taskbar (default):** `🎧 30%  🖱 93%` next to the notification area, drawn with the Windows icon font.
-- **Low battery:** a red number means 15% or less.
-- **Level bar:** a thin bar with round ends sits under each battery percentage, as wide as the number and filled to the level, in the taskbar's text colour. It turns green while the device charges and when it is full on power, and red when the battery is low (15% or less); the number itself stays in the text colour (this fork's replacement for BatteryHub's ⚡ and ✓). *Show charging (green bar)* in the menu turns the green, and the tray icon's blue charging bar, off; the hover tooltip still says "charging".
+- **Level bar:** a thin bar with round ends sits under each battery percentage, filled to the level, in the taskbar's text colour. Every bar is as wide as "100%", so levels compare at a glance and the strip keeps its width as they change. It turns green while the device charges and when it is full on power, and red when the battery is low (15% or less); the number itself stays in the text colour (this fork's replacement for BatteryHub's ⚡ and ✓). *Show charging* in the menu turns the green, and the tray icon's blue charging bar, off; the hover tooltip still says "charging".
 - **Asleep:** dimmed text means the device is asleep and the last known value is shown.
 - **Disconnected (optional):** turn on *Show disconnected devices* to display a dimmed `×` for devices whose driver explicitly reports an offline wireless link. This does not infer disconnection from a missed battery poll; the default remains to hide offline devices.
 - **Two devices of one kind:** with two mice (or two controllers...) both would get the same icon, so each one gets a tiny caption of up to 3 letters in the corner of its icon, taken from its name (`MX`, `PRO`), or a number when the names do not tell them apart. A device that is alone in its kind shows no caption.
@@ -14,7 +13,7 @@ Everything beyond the [README](../README.md): display options, alerts, installin
 - **Transparent taskbar themes** (e.g. Windhawk's Taskbar Styler): turn on *Background behind taskbar text* in the menu to keep the text readable over the wallpaper.
 - **Several monitors:** the widget shows on every monitor's taskbar, next to its clock, so it stays visible while a game runs fullscreen. *Show the widget on* in the menu picks *All monitors*, *Main monitor only*, or one display (e.g. only *Display 3*).
 - **More display options:** *Icons above percentages* stacks each icon over its level to save width; *Brand colors* shows known brands in their color (Razer green, HyperX red, ...), level bar included; two devices of the same kind get a tiny caption so they can be told apart; left and right taskbars get a column of devices.
-- **Languages:** English, العربية, Deutsch, Español, Français, עברית, 日本語, Polski, Português (Brasil), Русский, Türkçe, 简体中文 and 繁體中文. The app follows the Windows display language; *Language* in the menu picks another one. See [Translations](#translations) to add or improve a language.
+- **Languages:** English, العربية, Deutsch, Español, Français, עברית, 日本語, 한국어, Polski, Português (Brasil), Русский, Türkçe, Українська, 简体中文 and 繁體中文. The app follows the Windows display language; *Language* in the menu picks another one. See [Translations](#translations) to add or improve a language.
 - **Brand colors:** devices of 15 known brands get their maker's color, with a soft glow and a thin level bar under the
   percentage: Razer green, Logitech blue, SteelSeries orange, Corsair yellow, HyperX / ROG / ZOWIE red, PlayStation,
   Xbox, Samsung, Apple, Jabra, JBL, Cooler Master and Steam. Each color has a dark- and a light-taskbar shade. The brand
@@ -33,18 +32,19 @@ Everything beyond the [README](../README.md): display options, alerts, installin
   - *Network download / upload speed* add up the real network adapters (Ethernet, Wi-Fi), in decimal bytes
     per second: `K` = kB/s, `M` = MB/s, `G` = GB/s.
 
-  Readings come from Windows performance counters (GPU and VRAM usage), DXGI, the graphics driver (D3DKMT,
-  with NVIDIA's `nvml.dll` only as a GPU temperature fallback), the disks' and energy meters' own drivers, the
-  network interface table and the storage temperature query on the drive that holds Windows: no driver, no admin
-  rights, nothing downloaded. A reading the PC does not provide is left out. There is no CPU temperature, because
+  Readings come from Windows performance counters (GPU and VRAM usage), DXGI, the graphics driver (D3DKMT), the
+  disks' and energy meters' own drivers, the network interface table and the storage temperature query on the
+  drive that holds Windows: no driver, no admin rights, nothing downloaded. A reading the PC does not provide is
+  left out: *GPU temperature* needs a graphics driver that reports it (NVIDIA's `nvml.dll` is not used, as it
+  adds about 20 MB). There is no CPU temperature, because
   Windows only exposes it through a kernel driver. Taskbar widget only; nothing is read in tray-icon mode. Idea
   from [TraySense](https://github.com/DMTWEAKS/TraySense); no code was taken from it.
 - **Off means not read (this fork):** everything you can switch off stops being read, not just hidden:
   - *Hardware on the taskbar*: each reading's source closes when it is off; GPU and VRAM usage (the costliest,
     they load `pdh.dll`) unload it when both are off.
   - *Read batteries from*: *Bluetooth devices and earbuds* (Windows' Bluetooth levels, AirPods / Fast Pair /
-    Galaxy Buds / Nothing Ear, GameSir over Bluetooth, and every Bluetooth HID device), *Phone (Microsoft Phone
-    Link)*, *Xbox controllers*, and *HeadsetControl (more headsets)*. HeadsetControl is **off by default** in
+    Galaxy Buds / Nothing Ear, GameSir over Bluetooth, and every Bluetooth HID device), *Phone* (Microsoft Phone
+    Link), *Xbox controllers*, and *HeadsetControl* (more headsets). HeadsetControl is **off by default** in
     this fork, because it runs `headsetcontrol.exe` about once a minute; switch it on if a headset only shows
     up through it. The Bluetooth broadcast listener also stops by itself as soon as no AirPods or Bluetooth
     headset needs it.
@@ -151,6 +151,9 @@ BatteryHub.exe --report   # open the "Request support for a device" window
 BatteryHub.exe --demo     # sample devices of every brand instead of real ones (screenshots, checking colors)
 BatteryHub.exe --quit     # close the running instance
 ```
+
+`--list` and `--json` read only the sources switched on under *Read from* (HeadsetControl is off unless you
+switched it on).
 
 The Linux build uses the same flags with `wireless-battery` instead of `BatteryHub.exe`, and
 also accepts `--help`. `--json` prints a stable array that scripts and bar widgets can parse:

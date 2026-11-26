@@ -27,8 +27,6 @@ inline std::string WideToUtf8(const std::wstring& s) {
     WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(), out.data(), n, nullptr, nullptr);
     return out;
 }
-inline unsigned long long PlatNowMs() { return GetTickCount64(); }
-inline void PlatSleep(unsigned long ms) { Sleep(ms); }
 
 #else  // __linux__
 
@@ -52,8 +50,6 @@ inline ULONGLONG GetTickCount64() {
     return (ULONGLONG)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 inline void Sleep(DWORD ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
-inline unsigned long long PlatNowMs() { return GetTickCount64(); }
-inline void PlatSleep(unsigned long ms) { Sleep((DWORD)ms); }
 
 // std::wstring is UTF-32 on Linux; hidapi/sysfs paths and names are UTF-8.
 inline std::wstring Utf8ToWide(const std::string& s) {

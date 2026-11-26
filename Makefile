@@ -112,6 +112,22 @@ test: test-update-core test-update-win test-update-signature
 	./build/jabra_driver_test.exe
 	$(CXX) -std=c++17 -O2 -Wall tests/gamesir_ble_protocol_test.cpp -o build/gamesir_ble_protocol_test.exe
 	./build/gamesir_ble_protocol_test.exe
+	$(CXX) $(CXXFLAGS) tests/arbiter_driver_test.cpp src/drivers/arbiter.cpp src/drivers/lamzu.cpp -o build/arbiter_driver_test.exe
+	./build/arbiter_driver_test.exe
+	$(CXX) $(CXXFLAGS) tests/dareu_driver_test.cpp src/drivers/dareu.cpp -o build/dareu_driver_test.exe
+	./build/dareu_driver_test.exe
+	$(CXX) $(CXXFLAGS) tests/semico_driver_test.cpp src/drivers/semico.cpp -o build/semico_driver_test.exe
+	./build/semico_driver_test.exe
+	$(CXX) $(CXXFLAGS) tests/steelseries_driver_test.cpp src/drivers/steelseries.cpp -o build/steelseries_driver_test.exe
+	./build/steelseries_driver_test.exe
+	$(CXX) -std=c++17 -O2 -Wall tests/nothing_ear_protocol_test.cpp -o build/nothing_ear_protocol_test.exe
+	./build/nothing_ear_protocol_test.exe
+	$(CXX) -std=c++17 -O2 -Wall tests/json_output_test.cpp -o build/json_output_test.exe
+	./build/json_output_test.exe
+	$(CXX) -std=c++17 -O2 -Wall -Wextra tests/widget_rules_test.cpp -o build/widget_rules_test.exe
+	./build/widget_rules_test.exe
+	$(CXX) $(CXXFLAGS) tests/widget_layout_test.cpp src/i18n.cpp src/brands.cpp -o build/widget_layout_test.exe $(LIBS)
+	./build/widget_layout_test.exe
 
 test-update-core:
 	@mkdir -p build

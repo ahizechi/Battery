@@ -27,7 +27,7 @@ struct PollContext
     }
     // A device key that stays the same when the receiver moves to another USB port (HID paths change
     // with the port, so they must not be part of a key): `base` for the first such device in this poll,
-    // then `base#2`, `base#3` ... for more identical ones. Settings and battery history follow the key.
+    // then `base#2`, `base#3` ... for more identical ones. Settings follow the key.
     std::wstring StableKey(const std::wstring &base) const
     {
         auto taken = [&](const std::wstring &k) {
