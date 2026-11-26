@@ -17,7 +17,7 @@ jobs:
       # Actions are pinned to exact commits so a moved tag cannot swap in different code.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+      - uses: msys2/setup-msys2@3c51bf698df1e37b2261f53cb67797b97761185c # v2
         with:
           msystem: MINGW64
           install: mingw-w64-x86_64-gcc make
