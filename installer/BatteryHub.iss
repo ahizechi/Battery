@@ -59,6 +59,12 @@ Filename: "{app}\BatteryHub.exe"; Parameters: "--quit"; Flags: runhidden waitunt
 [Code]
 const
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
+  AppWindowClass = 'WirelessBatteryWnd';  { the app's hidden main window; --quit closes it }
+
+var
+  { A manual upgrade closes the running app. A silent one skips the "Start BatteryHub now" step,
+    so it starts the app again itself (the in-app updater's helper restarts it on updates). }
+  RestartAfterInstall: Boolean;
 
 function IsUpdate(): Boolean;
 begin
@@ -165,11 +171,19 @@ begin
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
 begin
   if (CurStep = ssInstall) and not IsUpdate() then
+  begin
+    RestartAfterInstall := WizardSilent() and (FindWindowByClassName(AppWindowClass) <> 0);
     QuitRunningApp();  { upgrade: close the old version so its files can be replaced }
+  end;
   if CurStep = ssPostInstall then
     MigrateAutostart();
+  if (CurStep = ssPostInstall) and RestartAfterInstall then
+    { As the signed-in user, not an elevated setup's account; the app's mutex stops a second copy. }
+    ExecAsOriginalUser(ExpandConstant('{app}\BatteryHub.exe'), '', '', SW_SHOWNORMAL, ewNoWait, ResultCode);
   if (CurStep = ssPostInstall) and not IsUpdate() then
   begin
     { Same value the app's own "Start with Windows" menu item writes, so the two stay in sync. }
