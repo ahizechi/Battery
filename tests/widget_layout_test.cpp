@@ -5,6 +5,9 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
+#include <string>
 
 namespace {
 
@@ -25,7 +28,7 @@ WidgetItem Reading(const wchar_t* tag, const wchar_t* text) {
 bool Same(Rgb a, Rgb b) { return a.r == b.r && a.g == b.g && a.b == b.b; }
 int Bottom(const Piece& p) { return p.y + p.m.h; }
 int Baseline(const Piece& p) { return p.y + p.m.base; }
-int Right(const Piece& p) { return p.x + std::max(p.m.w, p.barW); }
+int Right(const Piece& p) { return std::max(p.x + p.m.w, p.barW ? p.barX + p.barW : 0); }
 // Twice the vertical centre, so odd heights compare exactly.
 int Centre2(int top, int bottom) { return top + bottom; }
 
@@ -57,6 +60,19 @@ int main() {
     g_light = false;
     const Rgb fg{ 255, 255, 255 };
 
+    // The app loads Geist from its resources; this test has none, so it loads the same file from res/.
+    std::string dir = __FILE__;
+    dir = dir.substr(0, dir.find_last_of("/\\") + 1);
+    std::ifstream file(dir + "../res/Geist-Variable.ttf", std::ios::binary);
+    std::vector<char> ttf((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    assert(!ttf.empty() && LoadGeist(ttf.data(), (DWORD)ttf.size()));
+    HFONT geist = GeistFont(12);
+    assert(geist);
+    // Geist has what the strip shows in it; translated level words in other scripts fall back to Segoe.
+    for (const wchar_t* s : { L"100%", L"0123456789%", L"×", L"CPU", L"GPU PWR", L"VRAM", L"64°", L"1.2M" })
+        assert(Covers(geist, s));
+    assert(!Covers(geist, L"高"));  // a CJK character
+
     // Zek's screenshot: a charging headset at 84% and a mouse at 39%, plus a full keyboard and a low pad.
     WidgetItem headset = Battery(DeviceKind::Headset, 84);
     headset.charging = true;
@@ -75,10 +91,15 @@ int main() {
     assert(icons.size() == 4 && numbers.size() == 4);
     CheckInside(pieces, W, H);
 
-    // Every bar has one width, fits the widest number ("100%"), starts under its number and keeps clear of it.
+    // The numbers are Geist SemiBold, like Glide's tray reading.
+    const Mask geist84 = RenderMask(L"84%", geist, false);
+    assert(numbers[0]->m.w == geist84.w && numbers[0]->m.h == geist84.h && numbers[0]->m.a == geist84.a);
+    // Every bar has one width, fits the widest number ("100%") and keeps clear of it; the number is centred on it.
     const int bw = numbers[0]->barW;
+    assert(bw == RenderMask(L"100%", geist, false).w);
     for (auto* n : numbers) {
-        assert(n->barW == bw && n->barW >= n->m.w && n->barX == n->x);
+        assert(n->barW == bw && n->barW >= n->m.w);
+        assert(std::abs((2 * n->x + n->m.w) - (2 * n->barX + n->barW)) <= 1);
         assert(n->barH >= 2 && n->barY >= Bottom(*n) + 2);
     }
     // The bar width does not depend on the levels shown, so the strip keeps its width when a device reaches 100%.

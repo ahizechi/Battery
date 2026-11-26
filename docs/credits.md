@@ -13,6 +13,9 @@ Battery is a fork of BatteryHub. These are the people and projects whose work it
 - **[HeadsetControl](https://github.com/Sapd/HeadsetControl)** by Sapd and contributors (GPL-3.0),
   bundled for extra headsets.
 - App icon by [nik-txt](https://github.com/nik-txt) ([`res/app.svg`](../res/app.svg)).
+- **[Geist](https://github.com/vercel/geist-font)** by Vercel and basement.studio (SIL Open Font License 1.1):
+  the taskbar strip's numbers ([`res/Geist-Variable.ttf`](../res/Geist-Variable.ttf); licence in
+  `installer/THIRD_PARTY_NOTICES.txt`).
 
 The protocols come from these projects' research:
 
