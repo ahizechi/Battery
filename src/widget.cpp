@@ -518,7 +518,7 @@ struct Piece {
 constexpr int kPad = 8;          // left and right of the strip (the hover highlight's edge)
 constexpr int kIconGap = 6;      // icon or tag to its number
 constexpr int kDeviceGap = 16;   // one device to the next
-constexpr int kBarGap = 3;       // number to its level bar
+constexpr int kBarGap = 5;       // number to its level bar (3 looked cramped; Zek, 26 Nov 2026)
 constexpr int kBarHeight = 3;
 
 // Three arrangements of the same pieces:

@@ -100,7 +100,8 @@ int main() {
     for (auto* n : numbers) {
         assert(n->barW == bw && n->barW >= n->m.w);
         assert(std::abs((2 * n->x + n->m.w) - (2 * n->barX + n->barW)) <= 1);
-        assert(n->barH >= 2 && n->barY >= Bottom(*n) + 2);
+        assert(n->barH >= 2 && n->barY >= Bottom(*n) + 4);
+        assert(n->barY - Baseline(*n) == 5);  // 3 px looked cramped (Zek, 26 Nov 2026)
     }
     // The bar width does not depend on the levels shown, so the strip keeps its width when a device reaches 100%.
     g_items = { mouse };
