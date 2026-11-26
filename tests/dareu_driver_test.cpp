@@ -56,6 +56,8 @@ bool HidDev::OpenFeatureOnly(const HidColl& c) {
 }
 void HidDev::Close() {}
 void HidDev::Flush() { assert(c_.path == L"input"); }
+// dareu.cpp's other protocols read feature reports; the collections faked here never answer them.
+bool HidDev::GetFeature(BYTE, std::vector<BYTE>&) { return false; }
 bool HidDev::SetFeature(const std::vector<BYTE>& request) {
     assert(c_.path == L"feature");
     std::vector<BYTE> expected(17, 0);

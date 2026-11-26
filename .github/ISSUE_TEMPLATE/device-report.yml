@@ -1,0 +1,39 @@
+name: Device support
+description: Report a missing device, incorrect charge level, or connection-specific problem.
+body:
+  - type: input
+    id: model
+    attributes:
+      label: Device make and model
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection
+      options:
+        - USB receiver
+        - Bluetooth
+        - USB cable
+        - Other or multiple
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Battery and Windows versions
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: What happened and what did you expect?
+      description: Mention whether the device appears, how the reading changes, and what the vendor app reports if available.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Optional diagnostic output
+      description: Paste relevant excerpts from BatteryHub.exe --list or --dump. Remove personal information and identifying values you do not want to publish.
+      render: text

@@ -2,8 +2,8 @@
 // Hardware readings shown after the batteries on the taskbar strip: CPU, GPU, RAM, video memory and disk
 // usage, GPU and SSD temperature, CPU power (watts) and GPU power (percent of its limit), and network
 // speed. Everything comes from documented Windows interfaces that need no driver and no admin rights
-// (performance counters, DXGI, D3DKMT, the storage temperature query, the network interface table);
-// NVIDIA's own nvml.dll is tried for the GPU temperature when the graphics driver reports none.
+// (performance counters, DXGI, D3DKMT, the storage temperature query, the network interface table).
+// GPU temperature and power are only what the graphics driver reports.
 // There is no CPU temperature: Windows only exposes it through a kernel driver.
 // Call everything from the UI thread.
 

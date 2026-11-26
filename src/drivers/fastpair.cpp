@@ -54,6 +54,11 @@ void FastPairOnAdvert(UINT64 addr, const BYTE* data, UINT32 len) {
     if (!Parse(data, len, b)) return;
     b.tick = GetTickCount64();
     AcquireSRWLockExclusive(&g_lock);
+    // Earbuds from other people's phones nearby broadcast too: before adding a new address, drop the ones
+    // FastPairLookup would no longer use, so the map holds only what was heard in the last 5 minutes.
+    if (g_battery.find(addr) == g_battery.end())
+        for (auto it = g_battery.begin(); it != g_battery.end();)
+            it = b.tick - it->second.tick >= 5 * 60 * 1000 ? g_battery.erase(it) : std::next(it);
     g_battery[addr] = b;
     ReleaseSRWLockExclusive(&g_lock);
 }
