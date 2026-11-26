@@ -272,6 +272,6 @@ Refresh now = Aggiorna ora
 ```
 
 - **Use your own language right away:** choose *Language → Add your own language...* in the menu. It opens `%APPDATA%\WirelessBattery\lang` with `_template.txt`, which lists every phrase. Copy it to e.g. `it.txt`, fill in `@code`, `@name` and the translations, and the language appears in the menu (no restart needed). A file there with the same `@code` as a built-in language replaces its phrases, so you can also fix a single word locally.
-- **Share it with everyone:** send the file as a pull request to BatteryHub's [`lang/`](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor/tree/main/lang) (this fork picks it up from there). The build includes every file in that folder automatically; no code change is needed.
+- **Share it with everyone:** open a pull request for the relevant file under this repository’s [language directory](../lang/). The build includes files in that directory automatically.
 - Keep `{placeholders}` as they are, and add `@rtl = 1` for right-to-left scripts. Phrases left empty stay English, so a partial translation is fine.
 - The `--list` and `--dump` output stays English on purpose: it is pasted into GitHub issues.
