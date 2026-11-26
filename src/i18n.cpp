@@ -7,7 +7,9 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <forward_list>
 #include <map>
+#include <string_view>
 #include <unordered_map>
 
 namespace {
@@ -18,21 +20,23 @@ const wchar_t kSettingsKey[] = L"Software\\WirelessBattery";
 struct Source {
     std::wstring code, name;
     bool rtl = false;
-    std::vector<std::string> texts;  // UTF-8 file contents: built-in first, then user files
+    std::vector<std::string_view> texts;  // UTF-8 file contents: built-in first, then user files
 };
 
 std::map<std::wstring, Source> g_sources;           // by lower-case code
 std::unordered_map<std::wstring, std::wstring> g_phrases;  // English -> translation, for the active language
 std::wstring g_choice;                               // saved choice, "" = automatic
 bool g_rtl = false;
-std::string g_template;                              // lang/_template.txt, every English phrase
+std::string_view g_template;                         // lang/_template.txt, every English phrase
+// The built-in languages are read in place from the program's resource; only users' files are held here.
+std::forward_list<std::string> g_userFiles;
 
 std::wstring Lower(std::wstring s) {
     for (auto& c : s) c = (wchar_t)towlower(c);
     return s;
 }
 
-std::wstring Wide(const std::string& s) {
+std::wstring Wide(std::string_view s) {
     int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
     std::wstring w(n, 0);
     MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
@@ -62,7 +66,7 @@ std::wstring Unescape(const std::wstring& s) {
 
 // Calls fn(key, value) for every "key = value" line; metadata keys start with '@'.
 template <class Fn>
-void ForEachLine(const std::string& utf8, Fn fn) {
+void ForEachLine(std::string_view utf8, Fn fn) {
     std::wstring text = Wide(utf8);
     size_t pos = 0;
     while (pos <= text.size()) {
@@ -78,7 +82,7 @@ void ForEachLine(const std::string& utf8, Fn fn) {
 }
 
 // Reads @code / @name / @rtl from one file and files it under its language.
-void AddSource(const std::string& utf8, const std::wstring& fallbackCode) {
+void AddSource(std::string_view utf8, const std::wstring& fallbackCode) {
     std::wstring code = fallbackCode, name;
     bool rtl = false;
     ForEachLine(utf8, [&](const std::wstring& k, const std::wstring& v) {
@@ -101,15 +105,15 @@ void LoadBuiltIn() {
     HGLOBAL h = r ? LoadResource(nullptr, r) : nullptr;
     const char* data = h ? (const char*)LockResource(h) : nullptr;
     if (!data) return;
-    std::string all(data, SizeofResource(nullptr, r));
+    const std::string_view all(data, SizeofResource(nullptr, r));
     size_t pos = 0;
     while ((pos = all.find("@file ", pos)) != std::string::npos) {
         if (pos > 0 && all[pos - 1] != '\n') { pos += 6; continue; }
         size_t eol = all.find('\n', pos);
-        std::string file = all.substr(pos + 6, eol == std::string::npos ? std::string::npos : eol - pos - 6);
-        while (!file.empty() && (file.back() == '\r' || file.back() == ' ')) file.pop_back();
+        std::string_view file = all.substr(pos + 6, eol == std::string::npos ? std::string::npos : eol - pos - 6);
+        while (!file.empty() && (file.back() == '\r' || file.back() == ' ')) file.remove_suffix(1);
         size_t next = eol == std::string::npos ? all.size() : all.find("\n@file ", eol);
-        std::string body = eol == std::string::npos ? "" : all.substr(eol + 1, (next == std::string::npos ? all.size() : next) - eol - 1);
+        std::string_view body = eol == std::string::npos ? std::string_view() : all.substr(eol + 1, (next == std::string::npos ? all.size() : next) - eol - 1);
         if (file == "_template") g_template = body;
         else if (!file.empty() && file[0] != '_') AddSource(body, Wide(file));
         pos = next == std::string::npos ? all.size() : next + 1;
@@ -132,7 +136,7 @@ void LoadFolder(const std::wstring& dir) {
         if (file.empty() || file[0] == L'_' || fd.nFileSizeLow > 512 * 1024) continue;  // the template, or not a phrase list
         HANDLE h = CreateFileW((dir + L"\\" + file).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
         if (h == INVALID_HANDLE_VALUE) continue;
-        std::string data(fd.nFileSizeLow, '\0');
+        std::string& data = g_userFiles.emplace_front(fd.nFileSizeLow, '\0');
         DWORD got = 0;
         ReadFile(h, data.data(), (DWORD)data.size(), &got, nullptr);
         CloseHandle(h);
@@ -181,7 +185,7 @@ void Apply() {
     auto it = g_sources.find(code);
     if (it == g_sources.end()) return;  // English
     g_rtl = it->second.rtl;
-    for (const std::string& text : it->second.texts)  // built-in first, so a user's file wins
+    for (std::string_view text : it->second.texts)  // built-in first, so a user's file wins
         ForEachLine(text, [](const std::wstring& k, const std::wstring& v) {
             if (!k.empty() && k[0] != L'@' && !v.empty()) g_phrases[Unescape(k)] = Unescape(v);
         });
@@ -193,6 +197,7 @@ namespace i18n {
 
 void Init() {
     g_sources.clear();
+    g_userFiles.clear();
     LoadBuiltIn();
     LoadFolder(ExeFolder() + L"\\lang");
     LoadFolder(UserFolder());

@@ -101,7 +101,6 @@ struct TrayEntry {
     ULONGLONG lastSeen = 0;
     bool added = false;
     bool lowWarned = false;
-    std::wstring iconSig;    // what the current icon shows, to avoid needless redraws
     HICON icon = nullptr;
 };
 std::map<std::wstring, TrayEntry> g_entries;
@@ -274,6 +273,16 @@ bool LoadBoolSetting(const wchar_t* name, bool defaultVal) {
     return v != 0;
 }
 
+// The sources switched on in the menu; --list and --json read only these too.
+PollOptions SavedSources() {
+    PollOptions o;
+    o.bluetooth = LoadBoolSetting(L"ReadBluetooth", true);
+    o.phoneLink = LoadBoolSetting(L"ReadPhoneLink", true);
+    o.xinput = LoadBoolSetting(L"ReadXInput", true);
+    o.headsetControl = LoadBoolSetting(L"ReadHeadsetControl", false);  // off by default: runs a program
+    return o;
+}
+
 void SaveBoolSetting(const wchar_t* name, bool on) {
     DWORD v = on ? 1 : 0;
     RegSetKeyValueW(HKEY_CURRENT_USER, kSettingsKey, name, REG_DWORD, &v, sizeof(v));
@@ -428,8 +437,10 @@ HICON RenderIcon(const std::wstring& text, int barPct, Rgb textColor, Rgb barCol
     SetTextColor(dc, RGB(255, 255, 255));
     auto* sp = static_cast<DWORD*>(sbits);
 
+    // The largest font (up to twice the text height) whose ink fits the icon: one render at the largest size gives
+    // the scale, then a step or two finds the exact size (hinting makes ink sizes not quite proportional).
     int bx0 = 0, by0 = 0, bx1 = -1, by1 = -1;
-    for (int fh = textH * 2; fh >= 6; fh--) {
+    auto draw = [&](int fh) {
         HFONT f = CreateFontW(-fh, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                               ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
         HGDIOBJ oldF = SelectObject(dc, f);
@@ -443,8 +454,21 @@ HICON RenderIcon(const std::wstring& text, int barPct, Rgb textColor, Rgb barCol
         for (int y = 0; y < H; y++)
             for (int x = 0; x < W; x++)
                 if (sp[y * W + x] & 0xFF) { bx0 = std::min(bx0, x); bx1 = std::max(bx1, x); by0 = std::min(by0, y); by1 = std::max(by1, y); }
-        if (bx1 < 0) break;
-        if (bx1 - bx0 + 1 <= S && by1 - by0 + 1 <= textH) break;
+        return bx1 < 0 || (bx1 - bx0 + 1 <= S && by1 - by0 + 1 <= textH);  // fits (or draws nothing)
+    };
+    const int largest = textH * 2;
+    if (!draw(largest) && bx1 >= 0) {
+        const double scale = std::min((double)S / (bx1 - bx0 + 1), (double)textH / (by1 - by0 + 1));
+        int fh = std::clamp((int)(largest * scale), 6, largest - 1);
+        if (draw(fh))
+            for (;;) {  // grow while a size still fits; one size may overflow where the next fits again
+                if (fh + 1 < largest && draw(fh + 1)) fh++;
+                else if (fh + 2 < largest && draw(fh + 2)) fh += 2;
+                else break;
+            }
+        else
+            while (fh > 6 && !draw(--fh)) {}
+        draw(fh);  // leave the chosen size in the scratch bitmap
     }
 
     // final icon bitmap
@@ -608,19 +632,15 @@ void ApplyEntry(TrayEntry& e) {
     bool dim = !s.connected || s.percent < 0;
     // Fully charged on power: the normal green bar instead of the blue charging one.
     bool charging = g_showCharging && s.connected && !s.asleep && s.charging && !s.full && shown < 100;
-    Accent accent = AccentFor(s);
-    std::wstring sig = std::to_wstring(shown) + (charging ? L"c" : L"") + (dim ? L"d" : L"") + (g_lightTaskbar ? L"l" : L"k") +
-                       L"a" + std::to_wstring((int)accent) + (s.connected ? L"|on" : L"|off");
-    if (sig != e.iconSig || !e.icon) {
-        if (e.icon) DestroyIcon(e.icon);
-        e.icon = s.connected ? IconFor(shown, charging, dim, accent)
-                             : RenderIcon(L"\u00D7", -1, Foreground(), Foreground(), true);
-        e.iconSig = sig;
-    }
+    // Drawn from the current state every time (a few small font renders); the shell keeps its own copy.
+    HICON old = e.icon;
+    e.icon = s.connected ? IconFor(shown, charging, dim, AccentFor(s))
+                         : RenderIcon(L"\u00D7", -1, Foreground(), Foreground(), true);
     std::wstring tip = DisplayName(e) + L"\n" + StatusText(e);
 
     TrayCall(e.added ? NIM_MODIFY : NIM_ADD, e.uid, e.icon, tip);
     e.added = true;
+    if (old) DestroyIcon(old);
 }
 
 int KindOrder(DeviceKind k) {  // default order: headset first, then mouse, ...
@@ -670,14 +690,14 @@ const wchar_t* HardwareName(hardware::Metric m) {  // menu item and tooltip line
         case hardware::Cpu:     return T(L"CPU usage");
         case hardware::Gpu:     return T(L"GPU usage");
         case hardware::GpuTemp: return T(L"GPU temperature");
-        case hardware::Vram:    return T(L"Video memory (VRAM) usage");
+        case hardware::Vram:    return T(L"Video memory usage");
         case hardware::Ram:     return T(L"RAM usage");
         case hardware::Disk:    return T(L"Disk activity");
         case hardware::NetDown: return T(L"Network download speed");
         case hardware::NetUp:   return T(L"Network upload speed");
         case hardware::CpuPower: return T(L"CPU power");
-        case hardware::GpuPower: return T(L"GPU power (share of its limit)");
-        default:                return T(L"SSD temperature (Windows drive)");
+        case hardware::GpuPower: return T(L"GPU power");
+        default:                return T(L"SSD temperature");
     }
 }
 
@@ -925,7 +945,7 @@ void RedrawAll() {
         g_placeholderIcon = nullptr;
         if (g_placeholder) { TrayDelete(PLACEHOLDER_ID); g_placeholder = false; }
     }
-    for (auto& [k, e] : g_entries) { e.iconSig.clear(); ApplyEntry(e); }
+    for (auto& [k, e] : g_entries) ApplyEntry(e);
     UpdatePlaceholder();
 }
 
@@ -1038,7 +1058,6 @@ void ShowMenu() {
     std::vector<std::wstring> keys;  // device index -> device key; menu id ID_DEVICE_FIRST + index * DEV_STRIDE + command
     std::vector<TrayEntry*> all = OrderedEntries(false), shown = OrderedEntries(true);
     if (all.empty()) AppendMenuW(m, MF_STRING | MF_GRAYED, 0, T(L"No devices with battery info found"));
-    else AppendMenuW(m, MF_STRING | MF_GRAYED, 0, T(L"Point at a device to show, hide or move it"));
     for (TrayEntry* e : all) {
         const std::wstring& k = e->st.key;
         UINT base = ID_DEVICE_FIRST + (UINT)keys.size() * DEV_STRIDE;
@@ -1046,6 +1065,10 @@ void ShowMenu() {
         bool canLeft = pos != shown.end() && pos != shown.begin();
         bool canRight = pos != shown.end() && pos + 1 != shown.end();
         HMENU sub = CreatePopupMenu();
+        if (!e->st.via.empty()) {  // how it is connected, as a heading
+            AppendMenuW(sub, MF_STRING | MF_GRAYED, 0, T(e->st.via).c_str());
+            AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
+        }
         AppendMenuW(sub, MF_STRING | (IsHidden(k) ? 0 : MF_CHECKED), base + DEV_TOGGLE,
                     g_wantWidget ? T(L"Show on the taskbar") : T(L"Show in the tray"));
         AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
@@ -1070,7 +1093,7 @@ void ShowMenu() {
         }
         AppendMenuW(sub, MF_POPUP, (UINT_PTR)alertMenu, T(L"Battery alerts"));
         std::wstring line = g_skipped.count(k) ? DisplayName(*e) + L":  " + T(L"not read while hidden")
-                                               : DisplayName(*e) + L":  " + StatusText(*e) + L"   [" + T(e->st.via) + L"]";
+                                               : DisplayName(*e) + L":  " + StatusText(*e);
         AppendMenuW(m, MF_POPUP | (IsHidden(k) ? 0 : MF_CHECKED), (UINT_PTR)sub, line.c_str());
         keys.push_back(k);
     }
@@ -1079,19 +1102,19 @@ void ShowMenu() {
     {
         HMENU sub = CreatePopupMenu();
         AppendMenuW(sub, MF_STRING | (g_readBluetooth ? MF_CHECKED : 0), ID_SOURCE_BLUETOOTH, T(L"Bluetooth devices and earbuds"));
-        AppendMenuW(sub, MF_STRING | (g_readPhoneLink ? MF_CHECKED : 0), ID_SOURCE_PHONE_LINK, T(L"Phone (Microsoft Phone Link)"));
+        AppendMenuW(sub, MF_STRING | (g_readPhoneLink ? MF_CHECKED : 0), ID_SOURCE_PHONE_LINK, T(L"Phone"));
         AppendMenuW(sub, MF_STRING | (g_readXInput ? MF_CHECKED : 0), ID_SOURCE_XINPUT, T(L"Xbox controllers"));
         AppendMenuW(sub, MF_STRING | (g_readHeadsetControl ? MF_CHECKED : 0), ID_SOURCE_HEADSETCONTROL,
-                    T(L"HeadsetControl (more headsets)"));
+                    T(L"HeadsetControl"));
         AppendMenuW(m, MF_POPUP, (UINT_PTR)sub, T(L"Read batteries from"));
     }
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING | (g_wantWidget ? MF_CHECKED : 0), ID_MODE_WIDGET, T(L"Show on the taskbar (icon + percentage)"));
+    AppendMenuW(m, MF_STRING | (g_wantWidget ? MF_CHECKED : 0), ID_MODE_WIDGET, T(L"Show on the taskbar"));
     AppendMenuW(m, MF_STRING | (!g_wantWidget ? MF_CHECKED : 0), ID_MODE_TRAY, T(L"Show as tray icons"));
     CheckMenuRadioItem(m, ID_MODE_WIDGET, ID_MODE_TRAY, g_wantWidget ? ID_MODE_WIDGET : ID_MODE_TRAY, MF_BYCOMMAND);
     UINT bgFlags = MF_STRING | (g_widgetBackground ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED);
-    AppendMenuW(m, bgFlags, ID_WIDGET_BACKGROUND, T(L"Background behind taskbar text (for transparent taskbars)"));
-    AppendMenuW(m, MF_STRING | (g_stacked ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED), ID_STACKED, T(L"Icons above percentages (narrower)"));
+    AppendMenuW(m, bgFlags, ID_WIDGET_BACKGROUND, T(L"Background behind taskbar text"));
+    AppendMenuW(m, MF_STRING | (g_stacked ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED), ID_STACKED, T(L"Icons above percentages"));
     // With more than one monitor: choose which taskbars show the widget (all, main only, or one monitor).
     auto monitors = widget::OtherMonitors();
     if (monitors.size() > 31) monitors.resize(31);
@@ -1113,8 +1136,8 @@ void ShowMenu() {
         CheckMenuRadioItem(sub, ID_MONITOR_ALL, ID_MONITOR_FIRST + 31, checked, MF_BYCOMMAND);
         AppendMenuW(m, MF_POPUP | (g_wantWidget ? 0 : MF_GRAYED), (UINT_PTR)sub, T(L"Show the widget on"));
     }
-    AppendMenuW(m, MF_STRING | (g_brandColors ? MF_CHECKED : 0), ID_BRAND_COLORS, T(L"Brand colors (Razer green, Logitech blue, ...)"));
-    AppendMenuW(m, MF_STRING | (g_showCharging ? MF_CHECKED : 0), ID_SHOW_CHARGING, T(L"Show charging (green bar)"));
+    AppendMenuW(m, MF_STRING | (g_brandColors ? MF_CHECKED : 0), ID_BRAND_COLORS, T(L"Brand colors"));
+    AppendMenuW(m, MF_STRING | (g_showCharging ? MF_CHECKED : 0), ID_SHOW_CHARGING, T(L"Show charging"));
     {
         HMENU sub = CreatePopupMenu();
         for (hardware::Metric hm : kHardwareOrder)
@@ -1139,7 +1162,7 @@ void ShowMenu() {
     if (languages.size() > 64) languages.resize(64);
     {
         HMENU sub = CreatePopupMenu();
-        AppendMenuW(sub, MF_STRING, ID_LANG_AUTO, T(L"Automatic (Windows language)"));
+        AppendMenuW(sub, MF_STRING, ID_LANG_AUTO, T(L"Automatic"));
         AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
         UINT checked = ID_LANG_AUTO;
         for (UINT i = 0; i < languages.size(); i++) {
@@ -1428,7 +1451,7 @@ int ListToConsole(bool dump) {
         }
         return 0;
     }
-    auto list = PollAllDevices();
+    auto list = PollDevices(SavedSources());
     if (list.empty()) write(L"No devices with battery info found.\n");
     for (auto& s : list) {
         Accent accent = BrandOf(s);
@@ -1455,7 +1478,7 @@ int ListJson() {
         if (AttachConsole(ATTACH_PARENT_PROCESS))
             out = CreateFileW(L"CONOUT$", GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
     }
-    std::string text = DevicesToJson(PollAllDevices());  // UTF-8
+    std::string text = DevicesToJson(PollDevices(SavedSources()));  // UTF-8
     if (out && out != INVALID_HANDLE_VALUE) {
         DWORD written = 0;
         WriteFile(out, text.data(), (DWORD)text.size(), &written, nullptr);
@@ -1565,10 +1588,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
         e.st.vid = d.vid;
         e.st.pid = d.pid;
     }
-    g_readBluetooth = LoadBoolSetting(L"ReadBluetooth", true);
-    g_readPhoneLink = LoadBoolSetting(L"ReadPhoneLink", true);
-    g_readXInput = LoadBoolSetting(L"ReadXInput", true);
-    g_readHeadsetControl = LoadBoolSetting(L"ReadHeadsetControl", false);  // off by default: runs a program
+    const PollOptions saved = SavedSources();
+    g_readBluetooth = saved.bluetooth;
+    g_readPhoneLink = saved.phoneLink;
+    g_readXInput = saved.xinput;
+    g_readHeadsetControl = saved.headsetControl;
     UpdatePollOptions();  // before the worker's first poll
     LoadOrder();
     LoadAliases();

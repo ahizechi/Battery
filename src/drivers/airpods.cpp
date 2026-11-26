@@ -276,8 +276,10 @@ void PollAirPods(PollContext& ctx) {
                 s.percent = a.box;
                 s.charging = a.boxChg;
             }
-            s.via = L"Bluetooth \x00B7 L " + Pct(a.left) + (a.leftChg ? L"\x26A1" : L"") + L"  R " + Pct(a.right) +
-                    (a.rightChg ? L"\x26A1" : L"") + L"  case " + Pct(a.box) + (a.boxChg ? L"\x26A1" : L"");
+            // The split goes in the detail, shown after the level, like Fast Pair earbuds (generic.cpp).
+            s.via = L"Bluetooth";
+            s.detail = L"L " + Pct(a.left) + (a.leftChg ? L" \x26A1" : L"") + L", R " + Pct(a.right) +
+                       (a.rightChg ? L" \x26A1" : L"") + L", case " + Pct(a.box) + (a.boxChg ? L" \x26A1" : L"");
         }
         s.graceSec = d.connected ? 300 : 0;
         ctx.out.push_back(s);
