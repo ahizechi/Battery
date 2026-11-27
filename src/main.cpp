@@ -46,7 +46,6 @@ const GUID kDisplayStateGuid = { 0x6fe69556, 0x704a, 0x47a0, { 0x8f, 0x24, 0xc2,
 // "Check battery every" choices in seconds; 60 is the default. A poll resets an awake device's sleep timer,
 // so a device only sleeps if its timer is shorter than the interval.
 constexpr DWORD POLL_SECONDS[] = { 30, 60, 120, 300, 600, 900, 1800, 3600 };
-constexpr int LOW_BATTERY = 15;
 constexpr UINT PLACEHOLDER_ID = 1;
 constexpr UINT ALERT_ICON_ID = 2;
 
@@ -104,7 +103,7 @@ struct TrayEntry {
     HICON icon = nullptr;
 };
 std::map<std::wstring, TrayEntry> g_entries;
-std::map<std::wstring, bool> g_alertLatches;  // survive transient removal of a device
+std::map<std::wstring, alerts::Latch> g_alertLatches;  // survive transient removal of a device
 bool g_alertIconAdded = false;  // short-lived tray icon for widget-mode notifications
 bool g_placeholder = false;
 HICON g_placeholderIcon = nullptr;
@@ -522,15 +521,16 @@ Rgb Foreground() { return g_lightTaskbar ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 }
 
 Accent AccentFor(const DeviceStatus& s) { return g_brandColors ? BrandOf(s) : Accent::None; }
 
-HICON IconFor(int pct, bool charging, bool dim, Accent accent) {
+// `low`: the device's low level (alerts::LowThreshold), at or below which the icon turns red.
+HICON IconFor(int pct, int low, bool charging, bool dim, Accent accent) {
     Rgb fg = Foreground();
     BrandColor bc = AccentColor(accent, g_lightTaskbar);
     Rgb bar = charging        ? Rgb{ 0, 170, 255 }
-            : pct <= LOW_BATTERY ? Rgb{ 232, 32, 48 }
+            : pct <= low      ? Rgb{ 232, 32, 48 }
             : pct <= 30       ? Rgb{ 255, 150, 0 }
             : accent != Accent::None ? Rgb{ bc.r, bc.g, bc.b }
                               : Rgb{ 30, 190, 90 };
-    Rgb text = (!charging && pct >= 0 && pct <= LOW_BATTERY) ? Rgb{ 240, 50, 60 } : fg;
+    Rgb text = (!charging && pct >= 0 && pct <= low) ? Rgb{ 240, 50, 60 } : fg;
     std::wstring t = pct < 0 ? L"?" : std::to_wstring(pct);
     return RenderIcon(t, pct, text, bar, dim);
 }
@@ -634,7 +634,7 @@ void ApplyEntry(TrayEntry& e) {
     bool charging = g_showCharging && s.connected && !s.asleep && s.charging && !s.full && shown < 100;
     // Drawn from the current state every time (a few small font renders); the shell keeps its own copy.
     HICON old = e.icon;
-    e.icon = s.connected ? IconFor(shown, charging, dim, AccentFor(s))
+    e.icon = s.connected ? IconFor(shown, alerts::LowThreshold(g_alertOverrides, s.key), charging, dim, AccentFor(s))
                          : RenderIcon(L"\u00D7", -1, Foreground(), Foreground(), true);
     std::wstring tip = DisplayName(e) + L"\n" + StatusText(e);
 
@@ -758,7 +758,8 @@ void UpdateWidget() {
         it.charging = !offline && !e->st.asleep && e->st.charging;
         it.full = !offline && (e->st.full || (e->st.charging && it.percent >= 100));
         it.dim = offline || e->st.percent < 0;
-        it.low = !offline && !it.charging && it.percent >= 0 && it.percent <= LOW_BATTERY;
+        it.low = !offline && !it.charging && it.percent >= 0 &&
+                 it.percent <= alerts::LowThreshold(g_alertOverrides, e->st.key);
         it.bluetooth = e->st.via == L"Bluetooth";
         it.label = labels[items.size()];
         it.accent = AccentFor(e->st);
@@ -814,11 +815,11 @@ void OnResults(std::vector<DeviceStatus>& results) {
         // Evaluate even in widget mode: ApplyEntry only manages tray icons.
         // Alert latches are kept by stable device key even if the driver briefly stops reporting it.
         if (const auto it = g_alertLatches.find(s.key); it != g_alertLatches.end())
-            e.lowWarned = it->second;
+            e.lowWarned = it->second.warned;
         bool notify = !IsHidden(s.key) &&
                       alerts::ShouldNotify(s, alerts::EffectiveThreshold(g_alertOverrides, s.key), e.lowWarned);
-        g_alertLatches[s.key] = e.lowWarned;
-        if (g_alertLatches.size() > 256) g_alertLatches.erase(g_alertLatches.begin());
+        g_alertLatches[s.key] = { e.lowWarned, e.lastSeen };
+        alerts::TrimLatches(g_alertLatches);
         ApplyEntry(e);
         if (notify) ShowBatteryAlert(e);
     }
@@ -1031,7 +1032,11 @@ void SetAlertOverride(const std::wstring& key, int threshold) {
     SaveAlertThresholds();
     g_alertLatches.erase(key);
     auto it = g_entries.find(key);
-    if (it != g_entries.end()) it->second.lowWarned = false;
+    if (it != g_entries.end()) {
+        it->second.lowWarned = false;
+        ApplyEntry(it->second);  // the red "low" colour follows the new threshold straight away
+    }
+    UpdateWidget();
     SetEvent(g_refreshEvt);  // reconsider with a fresh reading; never alert from stale data
 }
 

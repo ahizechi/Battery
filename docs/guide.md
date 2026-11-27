@@ -28,6 +28,8 @@ Everything beyond the [README](../README.md): display options, alerts, installin
     Interface; recent Intel and AMD processors).
   - *GPU power* is the graphics card's draw as a share of its power limit, as its driver reports it (13% of a
     250 W limit is about 32 W). Watts would need NVIDIA's `nvml.dll`, which adds about 20 MB and never unloads.
+  - *SSD temperature* is the Windows drive's own sensor, read every 10 seconds whatever *Refresh every* says:
+    the query briefly holds up the app, and a drive's temperature changes slowly.
   - *Disk activity* is the busiest disk's active time, like Task Manager's.
   - *Network download / upload speed* add up the real network adapters (Ethernet, Wi-Fi), in decimal bytes
     per second: `K` = kB/s, `M` = MB/s, `G` = GB/s.

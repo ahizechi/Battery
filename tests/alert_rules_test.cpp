@@ -3,6 +3,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cwchar>
 #include <map>
 
 int main() {
@@ -71,6 +72,31 @@ int main() {
     assert(ShouldNotify(headphones, 15, secondWarned));
     assert(!ShouldNotify(headphones, 15, secondWarned));
     assert(warned);                        // the mouse and headphones have independent latches
+
+    // Issue #5: the red "low" colour follows the device's alert threshold, not a fixed 15%.
+    std::map<std::wstring, int> lows;
+    lows[L"at30"] = 30;
+    lows[L"at5"] = 5;
+    lows[L"off"] = kDisabled;
+    assert(LowThreshold(lows, L"at30") == 30);
+    assert(LowThreshold(lows, L"at5") == 5);
+    assert(LowThreshold(lows, L"unset") == kDefaultThreshold);
+    assert(LowThreshold(lows, L"off") == kDefaultThreshold);  // alerts off still shows low at the default
+
+    // Issue #6: past the cap, the latch seen longest ago goes, not the alphabetically first one.
+    std::map<std::wstring, Latch> latches;
+    latches[L"a:first-by-name"] = { true, 1000 };  // warned, recently seen: must survive
+    for (size_t i = 0; i < kMaxLatches - 1; i++) {
+        wchar_t key[16];
+        std::swprintf(key, 16, L"k%04zu", i);
+        latches[key] = { false, 2000 + i };
+    }
+    latches[L"z:oldest"] = { false, 10 };
+    assert(latches.size() == kMaxLatches + 1);
+    TrimLatches(latches);
+    assert(latches.size() == kMaxLatches);
+    assert(latches.count(L"a:first-by-name") && latches[L"a:first-by-name"].warned);
+    assert(!latches.count(L"z:oldest"));
 
     std::puts("Smart Battery Alerts policy tests passed");
 }

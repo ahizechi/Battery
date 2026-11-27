@@ -260,6 +260,9 @@ int ReadGpuTemperature() { return KmtTemperature(); }
 // ---- SSD temperature: the drive that holds Windows ------------------------------------------------
 
 HANDLE g_disk = INVALID_HANDLE_VALUE;
+constexpr ULONGLONG kSsdQueryMs = 10000;
+ULONGLONG g_ssdNextQuery = 0;  // GetTickCount64() of the next real query; 0 = query on the next Sample
+int g_ssdLast = -1;
 
 void OpenDisk() {
     if (g_disk != INVALID_HANDLE_VALUE) return;
@@ -285,6 +288,8 @@ void OpenDisk() {
 void CloseDisk() {
     if (g_disk != INVALID_HANDLE_VALUE) CloseHandle(g_disk);
     g_disk = INVALID_HANDLE_VALUE;
+    g_ssdNextQuery = 0;  // switched on again later: read at once, never a stale value
+    g_ssdLast = -1;
 }
 
 // STORAGE_TEMPERATURE_INFO / STORAGE_TEMPERATURE_DATA_DESCRIPTOR as declared in the Windows SDK's
@@ -310,8 +315,7 @@ static_assert(offsetof(SsdTemperatureDescriptor, TemperatureInfo) == 24, "STORAG
 constexpr int kStorageDeviceTemperatureProperty = 52;  // STORAGE_PROPERTY_ID StorageDeviceTemperatureProperty
 
 // The drive's own temperature (the NVMe "composite" sensor comes first); -1 when it reports none.
-int ReadSsdTemperature() {
-    if (g_disk == INVALID_HANDLE_VALUE) return -1;
+int QuerySsdTemperature() {
     STORAGE_PROPERTY_QUERY q{};
     q.PropertyId = static_cast<STORAGE_PROPERTY_ID>(kStorageDeviceTemperatureProperty);
     q.QueryType = PropertyStandardQuery;
@@ -325,6 +329,18 @@ int ReadSsdTemperature() {
     for (WORD i = 0; i < d->InfoCount && head + (size_t)(i + 1) * sizeof(SsdTemperatureInfo) <= got; i++)
         if (hardware_model::PlausibleTemperature(info[i].Temperature)) return info[i].Temperature;
     return -1;
+}
+
+// The query keeps the calling (UI) thread busy for about 2-3.5 ms, inside the driver even with an overlapped
+// handle (measured 27 Nov 2026), so it runs at most every kSsdQueryMs and the last value is reused in between:
+// a drive's temperature changes slowly and is shown in whole degrees (issue #4).
+int ReadSsdTemperature() {
+    if (g_disk == INVALID_HANDLE_VALUE) return -1;
+    const ULONGLONG now = GetTickCount64();
+    if (g_ssdNextQuery && now < g_ssdNextQuery) return g_ssdLast;
+    g_ssdNextQuery = now + kSsdQueryMs;
+    g_ssdLast = QuerySsdTemperature();
+    return g_ssdLast;
 }
 
 // ---- Disk activity: each disk's idle time from its driver ------------------------------------------
